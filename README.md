@@ -10,40 +10,140 @@
 
 ---
 
-### Что под капотом (v2.0):
-- **Чистые HTTP-запросы** (TLS-fingerprint Firefox 133 через `curl_cffi`). Никаких браузеров, работает даже на сервере за 2$.
-- **AnySolver Turnstile ProxyLess** — капча решается за 4-6 секунд напрямую через сервера сервиса.
-- **NotLetters API** — автоматическое чтение писем, мгновенный парсинг ссылок верификации и OTP-кодов.
-- **Auto-clean emails.txt** — при старте сам выкидывает почты, которые уже были зареганы, а во время работы сразу стирает строку с готовой почтой из файла.
-- **Двойной сейв результатов** — сразу пишет и в `results.json`, и в текстовый `results.txt` (для Блокнота).
-- **Живой дашборд** в консоли + журнал ошибок в `errors.txt`.
+## 🚀 Что под капотом (v2.0)
+- **Чистые HTTP-запросы** (TLS-fingerprint Firefox 133 через `curl_cffi`). Никаких браузеров, минимальное потребление RAM, работает даже на дешёвом сервере за 2$.
+- **AnySolver Turnstile ProxyLess** — капча решается за 4-6 секунд напрямую через облако сервиса.
+- **NotLetters API** — автоматический перехват входящих писем, парсинг ссылок верификации и 6-значных OTP-кодов.
+- **Auto-clean emails.txt** — при старте сам выкидывает почты, которые уже были зареганы ранее, а в процессе работы мгновенно стирает строку с готовой почтой из файла.
+- **Двойной сейв результатов** — сразу пишет и в `results.json`, и в читаемый `results.txt` (для Блокнота).
+- **Живой дашборд** в консоли + подробный журнал ошибок в `errors.txt`.
+- **Защита от зависания Windows** — системная пауза консоли при клике мыши (QuickEdit) отключена программно.
 
 ---
 
-### Быстрый запуск на сервере (1 строчка):
+## 📋 Как работает софт (Логика одного круга)
+1. Берёт свободную почту из `emails.txt` и рабочий прокси из `proxies.txt`.
+2. Запрашивает быстрое решение Turnstile капчи в AnySolver (решается за ~5 сек).
+3. Отправляет запрос на регистрацию пользователя в Cloudflare через ваш прокси.
+4. Слушает входящие письма через NotLetters API, забирает ссылку верификации и подтверждает аккаунт.
+5. Инициирует получение OTP-кода, перехватывает его из письма и запрашивает **Global API Key**.
+6. Сохраняет готовую связку сразу в **`results.txt`** и **`results.json`**.
+7. Мгновенно удаляет использованную почту из `emails.txt`.
 
-В PowerShell на сервере вставляешь одну команду и жмёшь Enter:
+---
 
-```powershell
-curl.exe -L -k -o cf.zip https://gh-proxy.com/https://github.com/overloooooord/cloudflare/archive/refs/heads/main.zip ; Expand-Archive -Path cf.zip -DestinationPath C:\Users\Administrator\cf_new -Force ; Copy-Item -Path "C:\Users\Administrator\cf_new\cloudflare-main\*" -Destination "C:\Users\Administrator\cloudflare-main\" -Recurse -Force ; Remove-Item "cf.zip", "C:\Users\Administrator\cf_new" -Recurse -Force ; cd "C:\Users\Administrator\cloudflare-main" ; & "C:\Users\Administrator\Desktop\src\python\python.exe" main.py
+## 💳 Что нужно пополнять и где брать (Расходники)
+
+Для полноценной работы нужны **2 сервиса** + **прокси** + **почты**:
+
+### 1. Сервис капчи — [AnySolver.com](https://anysolver.com)
+* **Зачем:** решает Cloudflare Turnstile капчи (при регистрации и при запросе Global API Key).
+* **Что пополнять:** закинуть на баланс $3–$5 (хватит на тысячи аккаунтов, одно решение стоит доли цента). Оплата криптой.
+* **Где взять ключ:** в личном кабинете скопировать **Client Key** (выглядит как `anysolver_01M1...`).
+* **Куда вставить:** в `config.py` в поле `CAPTCHA_API_KEY`.
+
+### 2. Сервис почт — [NotLetters.com](https://notletters.com)
+* **Зачем:** принимает входящие письма от Cloudflare, скрипт по API на лету вытаскивает из них ссылки активации и OTP-коды.
+* **Что пополнять:** подписка / баланс сервиса согласно их тарифам.
+* **Где взять ключ:** в разделе API сгенерировать токен.
+* **Куда вставить:** в `config.py` в поле `NOTLETTERS_API_KEY`.
+
+### 3. Список почт — файл `emails.txt`
+* Почты на доменах, привязанных к вашему аккаунту NotLetters.
+* **Формат записи:** каждая почта с новой строки:
+  ```text
+  email@domain.com:password
+  email2@domain.com:password
+  ```
+* *Важно:* скрипт сам автоматически удаляет из файла почты, которые уже были зарегистрированы!
+
+### 4. Список прокси — файл `proxies.txt`
+* Резидентские или качественные серверные IPv4 прокси (HTTP / SOCKS5).
+* Так как браузера нет, на 1 аккаунт уходит всего пара килобайт трафика.
+* **Формат записи:**
+  ```text
+  ip:port:user:pass
+  user:pass@ip:port
+  http://user:pass@ip:port
+  socks5://user:pass@ip:port
+  ```
+
+---
+
+## ⚙️ Настройка (`config.py`)
+
+Файл открывается любым Блокнотом:
+
+```python
+THREADS = 2                 # Сколько потоков крутить одновременно (рекомендуется 2-5)
+COUNT = 0                   # Сколько аккаунтов сделать (0 = без лимита, пока есть почты)
+CAPTCHA_SERVICE = 'anysolver'
+CAPTCHA_API_KEY = 'anysolver_...'  # Ключ AnySolver
+NOTLETTERS_API_KEY = '...'         # Ключ NotLetters
+CLOUDFLARE_PASSWORD = 'random'     # 'random' (уникальный сложный пароль) или свой фикс. пароль
+PROXIES_FILE = 'proxies.txt'
+EMAILS_FILE = 'emails.txt'
+OUTPUT_FILE = 'results.json'
 ```
 
-Или просто через интерактивное меню: двойной клик по **`start.bat`**.
+---
+
+## ⚡ Быстрый запуск на сервере
+
+### Способ 1 — Одна строка в PowerShell (чистое обновление и старт):
+Открой PowerShell на сервере, вставь команду и нажми Enter:
+
+```powershell
+Stop-Process -Name "python" -Force -ErrorAction SilentlyContinue ; curl.exe -L -k -o cf.zip https://gh-proxy.com/https://github.com/overloooooord/cloudflare/archive/refs/heads/main.zip ; Expand-Archive -Path cf.zip -DestinationPath C:\Users\Administrator\cf_new -Force ; Copy-Item -Path "C:\Users\Administrator\cf_new\cloudflare-main\*" -Destination "C:\Users\Administrator\cloudflare-main\" -Recurse -Force ; Remove-Item "cf.zip", "C:\Users\Administrator\cf_new" -Recurse -Force ; cd "C:\Users\Administrator\cloudflare-main" ; & "C:\Users\Administrator\Desktop\src\python\python.exe" main.py
+```
+
+### Способ 2 — Через меню:
+Дважды кликни по **`start.bat`**. Откроется интерактивное меню:
+```text
+============================================================
+   CLOUDFLARE AUTOREGER + GLOBAL API KEY
+============================================================
+
+    1. Запустить авторегер (Start)
+    2. Настройки (config.py)
+    3. Список почт (emails.txt)
+    4. Список прокси (proxies.txt)
+    5. Успешные результаты (results.json)
+    6. Журнал ошибок (errors.txt)
+    7. Проверка балансов и статуса
+    8. Выход
+```
+- Пункт **`1`** — запуск процесса.
+- Пункт **`7`** — моментальная проверка балансов AnySolver, NotLetters и количества прокси/почт в пуле.
 
 ---
 
-### Настройка (`config.py`):
-- `THREADS` — сколько аккаунтов регать параллельно (по умолчанию 2-3, можно ставить больше если прокси держат).
-- `CAPTCHA_API_KEY` — ключ от AnySolver.
-- `NOTLETTERS_API_KEY` — ключ от NotLetters.
-- `proxies.txt` — список прокси (формат `ip:port:user:pass` или `user:pass@ip:port`).
-- `emails.txt` — почты (формат `email:password`).
+## 📁 Структура файлов и где забирать результаты
+
+- **`results.txt`** — текстовый файл с готовыми аккаунтами (открывай обычным Блокнотом):
+  ```text
+  почта@mail.com:пароль_почты:пароль_кф:cfk_GlobalApiKey...
+  ```
+- **`results.json`** — структурированная база аккаунтов в формате JSON.
+- **`errors.txt`** — если аккаунт сорвался, сюда запишется точная причина со временем, шагом и прокси:
+  ```text
+  [2026-09-13 12:45:10] [почта@...] [Шаг: create_user] [Прокси: 74.81.81.81:823] create_user failed 429: rate limit
+  ```
+- **`autoreger.log`** — полный технический лог всех системных событий.
 
 ---
 
-### Где результаты:
-- `results.txt` — читаемый список `почта:пароль_почты:пароль_кф:Global_API_Key` (открывай Блокнотом).
-- `results.json` — json со всеми данными.
-- `errors.txt` — если какой-то прокси сдох или Cloudflare дал реджект, тут будет точный лог ошибки и шаг.
+## ❓ Частые вопросы и ошибки (FAQ)
+
+* **Капча висит или выдает таймаут:**  
+  Проверь баланс на AnySolver.com (пункт 7 в `start.bat`). Если баланс кончился, капчи перестанут решаться.
+* **Скрипт висит на шаге `wait_verify_email`:**  
+  Проверь баланс/подписку на NotLetters.com. Убедись, что письма от Cloudflare доходят до твоего домена.
+* **Ошибка `create_user failed 429` или `1111`:**  
+  Прокси попал под временный лимит запросов Cloudflare. Скрипт сам автоматически снимет этот прокси и переключится на следующий из `proxies.txt`.
+* **Терминал остановился при клике мышкой:**  
+  В коде уже вшит фикс отключения QuickEdit, но если в консоли всё же выделился текст белым/синим цветом — просто нажми **Enter** или пробел в окне консоли, чтобы снять выделение.
+
+---
 
 Черкани в телегу **@dreamdrainer**, если что-то надо докрутить или по новым проектам.
