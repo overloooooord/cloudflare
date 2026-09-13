@@ -206,6 +206,7 @@ def _ensure_deps():
 
 _ensure_deps()
 
+from datetime import datetime
 import asyncio
 import argparse
 import logging
@@ -255,13 +256,14 @@ _err_lock = asyncio.Lock()
 async def log_error_to_file(email: str, step: str, err_msg: str, proxy: str = ""):
     async with _err_lock:
         err_file = os.path.join(_SRC_DIR, 'errors.txt')
-        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        now_str = time.strftime("%Y-%m-%d %H:%M:%S")
         clean_err = str(err_msg).replace('\n', ' ').strip()
         short_p = proxy.split('@')[-1] if '@' in proxy else proxy
         line = f"[{now_str}] [{email or 'N/A'}] [Шаг: {step}] [Прокси: {short_p or '-'}] {clean_err}\n"
         try:
             with open(err_file, 'a', encoding='utf-8') as f:
                 f.write(line)
+                f.flush()
         except Exception:
             pass
 
