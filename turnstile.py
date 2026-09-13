@@ -13,52 +13,44 @@ async def _solve_anysolver(website_url: str, website_key: str, action: str, sess
     from cloudflare_api import FIREFOX_UA
 
     ua = user_agent or FIREFOX_UA
-    proxy_url = None
-    if proxy:
-        proxy_url = proxy if proxy.startswith('http://') or proxy.startswith('https://') else f'http://{proxy}'
-
     task = {
-        'type': 'TurnstileToken' if proxy_url else 'TurnstileTokenProxyLess',
+        'type': 'TurnstileTokenProxyLess',
         'websiteURL': website_url,
         'websiteKey': website_key,
         'pageAction': action,
         'userAgent': ua
     }
-    if proxy_url:
-        task['proxy'] = proxy_url
 
     create_payload = {
         'clientKey': api_key,
         'task': task,
         'settings': {
-            'routing': {'mode': 'autoMostReliable'},
-            'allowProxyReuse': True
+            'routing': {'mode': 'autoMostReliable'}
         }
     }
-    async with session.post(f'{base}/createTask', json=create_payload, timeout=aiohttp.ClientTimeout(total=30)) as r:
+    async with session.post(f'{base}/createTask', json=create_payload, timeout=aiohttp.ClientTimeout(total=20)) as r:
         data = await r.json()
     if data.get('errorId', 0) != 0:
-        raise RuntimeError(f"AnySolver createTask error: {data.get('errorDescription')}")
+        raise RuntimeError(f"AnySolver createTask: {data.get('errorDescription')}")
     task_id = data['taskId']
     logger.debug(f'AnySolver taskId={task_id}')
     get_payload = {'clientKey': api_key, 'taskId': task_id}
-    for attempt in range(35):
-        await asyncio.sleep(2 if attempt == 0 else 2)
-        async with session.post(f'{base}/getTaskResult', json=get_payload, timeout=aiohttp.ClientTimeout(total=30)) as r:
+    for attempt in range(25):
+        await asyncio.sleep(1.5)
+        async with session.post(f'{base}/getTaskResult', json=get_payload, timeout=aiohttp.ClientTimeout(total=20)) as r:
             result = await r.json()
         status = result.get('status')
         if status == 'ready':
             solution = result.get('solution', {})
             token = solution.get('token') or result.get('token')
             if not token:
-                raise RuntimeError(f'AnySolver ready but token missing: {result}')
-            logger.debug(f'AnySolver token: {token[:30]}...')
+                raise RuntimeError(f'AnySolver token missing: {result}')
             return token
         elif status in ('processing', 'idle'):
             continue
         else:
-            raise RuntimeError(f'AnySolver ошибка: {result}')
-    raise TimeoutError('AnySolver: не решил за 70 сек')
+            raise RuntimeError(f'AnySolver: {result}')
+    raise TimeoutError('AnySolver: таймаут решения (35 сек)')
 
 
 async def _solve_capsolver(website_url: str, website_key: str, action: str, session: aiohttp.ClientSession, proxy: str | None = None) -> str:
@@ -181,7 +173,7 @@ async def solve_turnstile(action: str, proxy: str | None=None, user_agent: str |
         raise RuntimeError('CAPTCHA_API_KEY не задан в config.py')
     website_url = ACTION_URLS.get(action, ACTION_URLS['onboarding'])
     service = config.CAPTCHA_SERVICE.lower()
-    for attempt in range(1, 4):
+    for attempt in range(1, 3):
         try:
             ssl_context = ssl.create_default_context()
             ssl_context.check_hostname = False
@@ -197,10 +189,10 @@ async def solve_turnstile(action: str, proxy: str | None=None, user_agent: str |
                 else:
                     raise ValueError(f'Неизвестный сервис капчи: {service}')
         except Exception as e:
-            logger.warning(f'[{action}] Ошибка решения капчи ({attempt}/3): {e}')
-            if attempt == 3:
+            logger.warning(f'[{action}] Ошибка решения капчи ({attempt}/2): {e}')
+            if attempt == 2:
                 raise e
-            await asyncio.sleep(2)
+            await asyncio.sleep(1)
 async def solve_cf_challenge(url: str, proxy: str) -> dict:
 
     if not config.CAPTCHA_API_KEY:

@@ -335,7 +335,7 @@ async def register_one(worker_id: int, proxy_pool: proxy_utils.ProxyPool, stats:
                     ui.update_worker(worker_id, email, "[yellow]Ожидание ссылки...[/yellow]", proxy or "-")
 
                 html = await mail_tm.wait_for_new_message(
-                    mail_session, mail_token, known_ids, timeout=90, poll_interval=0.5,
+                    mail_session, mail_token, known_ids, timeout=50, poll_interval=0.5,
                     email=mail_email, mail_password=mail_pass
                 )
                 verify_token = mail_tm.extract_verification_token(html)
@@ -357,7 +357,7 @@ async def register_one(worker_id: int, proxy_pool: proxy_utils.ProxyPool, stats:
 
                 async def _get_otp():
                     h_otp = await mail_tm.wait_for_new_message(
-                        mail_session, mail_token, known_ids_otp, timeout=90, poll_interval=0.5,
+                        mail_session, mail_token, known_ids_otp, timeout=50, poll_interval=0.5,
                         email=mail_email, mail_password=mail_pass
                     )
                     return mail_tm.extract_otp_code(h_otp)
@@ -393,11 +393,13 @@ async def register_one(worker_id: int, proxy_pool: proxy_utils.ProxyPool, stats:
         shutdown.set()
         return False
     except Exception as e:
-        if proxy and any(err_kw in str(e) for err_kw in ("Proxy", "Connection", "Timeout", "429", "Connect", "502", "504")):
-            proxy_pool.report_failure(proxy, reason=str(e)[:30])
+        err_msg = str(e)
+        if proxy and any(err_kw in err_msg for err_kw in ("Proxy", "Connection", "Timeout", "429", "Connect", "502", "504", "CurlError")):
+            proxy_pool.report_failure(proxy, reason=err_msg[:30])
         await stats.inc_failed()
-        logger.error(f"❌ [{email or 'N/A'}] {e}")
+        logger.error(f"❌ [{email or 'N/A'}] ({step}) {err_msg}")
         if ui:
+            ui.add_error(email, f"[{step}] {err_msg}", proxy or "-")
             ui.update_worker(worker_id, email or "-", f"[red]Ошибка ({step})[/red]", proxy or "-")
         if debug:
             logger.exception('Traceback:')

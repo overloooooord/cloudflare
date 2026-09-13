@@ -20,6 +20,7 @@ class TerminalUI:
         self.alive_proxies = total_proxies
         self.workers = {}  # worker_id -> {'email': '', 'status': 'Ожидание...', 'proxy': '', 'start': time.time()}
         self.recent_keys = []  # list of (email, key, elapsed)
+        self.recent_errors = []  # list of (time_str, email, reason, proxy)
         self.alerts = []
         self._live = None
         self._lock = asyncio.Lock()
@@ -48,6 +49,15 @@ class TerminalUI:
         self.recent_keys.insert(0, (email, key, elapsed))
         if len(self.recent_keys) > 4:
             self.recent_keys.pop()
+
+    def add_error(self, email: str, reason: str, proxy: str = ""):
+        now_str = datetime.now().strftime("%H:%M:%S")
+        clean_reason = str(reason).replace('\n', ' ').strip()
+        if len(clean_reason) > 55:
+            clean_reason = clean_reason[:52] + '...'
+        self.recent_errors.insert(0, (now_str, email or "-", clean_reason, proxy))
+        if len(self.recent_errors) > 4:
+            self.recent_errors.pop()
 
     def add_alert(self, alert_msg: str):
         if alert_msg not in self.alerts:
@@ -121,5 +131,18 @@ class TerminalUI:
                 recent_tbl.add_row(em, k, f"{t:.1f}s")
 
             components.append(Panel(recent_tbl, title="[bold green]Последние зарегистрированные аккаунты[/bold green]", border_style="green"))
+
+        if self.recent_errors:
+            err_tbl = Table(expand=True, show_edge=False, box=None)
+            err_tbl.add_column("Время", width=10, style="dim")
+            err_tbl.add_column("Email", ratio=3, style="yellow")
+            err_tbl.add_column("Причина ошибки", ratio=5, style="bold red")
+            err_tbl.add_column("Прокси", ratio=2, style="dim")
+
+            for t, em, r, p in self.recent_errors:
+                short_p = p.split('@')[-1] if '@' in p else p
+                err_tbl.add_row(t, em, r, short_p or "-")
+
+            components.append(Panel(err_tbl, title="[bold red]Последние ошибки (детали)[/bold red]", border_style="red"))
 
         return Group(*components)
