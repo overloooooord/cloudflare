@@ -19,9 +19,11 @@ if ! command -v python3 &>/dev/null; then
 fi
 
 if [ -f "requirements.txt" ]; then
-    echo "[*] Проверка и установка зависимостей из requirements.txt..."
     python3 -m pip install -r requirements.txt --break-system-packages 2>/dev/null || python3 -m pip install -r requirements.txt
 fi
 
-echo "[+] Запуск..."
-exec python3 -u main.py "$@"
+if [ $# -eq 0 ]; then
+    exec python3 launcher.py
+else
+    exec python3 -u main.py "$@"
+fi
