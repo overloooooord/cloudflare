@@ -1,151 +1,174 @@
 import asyncio
 import logging
+import os
 import re
-import socket
-import string
 import random
+import json
 import aiohttp
+
 logger = logging.getLogger(__name__)
-BASE_URL = 'https://api.mail.tm'
-def _random_str(length: int, chars: str=string.ascii_lowercase) -> str:
-    return ''.join(random.choices(chars, k=length))
-async def get_domain(session: aiohttp.ClientSession) -> str:
-    """Получить первый доступный домен mail.tm."""
-    for attempt in range(8):
-        try:
-            async with session.get(f'{BASE_URL}/domains?page=1', headers={'Accept': '*/*'}, timeout=aiohttp.ClientTimeout(total=20)) as r:
-                if r.status == 429:
-                    wait = 5 * (attempt + 1)
-                    logger.warning(f'mail.tm /domains 429 — rate limit, жду {wait}s...')
-                    await asyncio.sleep(wait)
-                    continue
-                if r.status != 200:
-                    text = await r.text()
-                    logger.warning(f'mail.tm /domains статус {r.status}: {text[:200]}')
-                    await asyncio.sleep(3)
-                    continue
-                data = await r.json()
-                members = data.get('hydra:member', [])
-                if members:
-                    return members[0]['domain']
-                logger.warning(f'mail.tm /domains: пустой список доменов (попытка {attempt + 1}/8)')
-        except aiohttp.ClientError as e:
-            logger.warning(f'mail.tm /domains сетевая ошибка (попытка {attempt + 1}/8): {type(e).__name__}: {e}')
-            logger.debug(f'mail.tm /domains traceback:', exc_info=True)
-        except Exception as e:
-            logger.warning(f'mail.tm /domains неожиданная ошибка (попытка {attempt + 1}/8): {type(e).__name__}: {e}')
-            logger.debug(f'mail.tm /domains traceback:', exc_info=True)
-        await asyncio.sleep(3 + attempt * 2)
-    raise RuntimeError('mail.tm: не удалось получить домен')
 
-async def create_mailbox(session: aiohttp.ClientSession) -> dict:
+BASE_URL = 'https://api.notletters.com'
 
-    domain = await get_domain(session)
-    login = 'fast_' + _random_str(10)
-    password = _random_str(10, string.ascii_lowercase + string.digits)
-    email = f'{login}@{domain}'
-    payload = {'address': email, 'password': password}
-    headers = {'Accept': '*/*', 'Content-Type': 'application/json'}
-    for attempt in range(6):
-        try:
-            async with session.post(f'{BASE_URL}/accounts', json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=15)) as r:
-                if r.status in (200, 201):
-                    break
-                if r.status == 429:
-                    wait = 3 * 2 ** attempt
-                    logger.debug(f'mail.tm 429, ждём {wait}s...')
-                    await asyncio.sleep(wait)
-                    continue
-                text = await r.text()
-                raise RuntimeError(f'mail.tm create account {r.status}: {text}')
-        except aiohttp.ClientError as e:
-            if attempt == 5:
-                raise
-            await asyncio.sleep(2)
-    for attempt in range(6):
-        try:
-            async with session.post(f'{BASE_URL}/token', json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=15)) as r:
-                if r.status == 200:
-                    data = await r.json()
-                    token = data.get('token')
-                    if token:
-                        return {'email': email, 'password': password, 'token': token}
-                if r.status == 429:
-                    wait = 3 * 2 ** attempt
-                    await asyncio.sleep(wait)
-                    continue
-                text = await r.text()
-                raise RuntimeError(f'mail.tm get token {r.status}: {text}')
-        except aiohttp.ClientError:
-            if attempt == 5:
-                raise
-            await asyncio.sleep(2)
-    raise RuntimeError('mail.tm: не удалось получить токен')
-async def wait_for_message(session: aiohttp.ClientSession, token: str, timeout: int=120, poll_interval: int=5) -> str:
+_email_pool: list[dict] = []
+_email_lock = asyncio.Lock()
+_pool_loaded = False
 
-    auth_headers = {'Authorization': f'Bearer {token}', 'Accept': '*/*'}
+
+def _load_pool(filepath: str = None):
+    global _email_pool, _pool_loaded
+    if _pool_loaded:
+        return
+    if filepath is None:
+        filepath = os.path.join(os.path.dirname(__file__), 'emails.txt')
+
+    registered_emails = set()
+    try:
+        import config
+        out_file = getattr(config, 'OUTPUT_FILE', 'results.json')
+        if not os.path.isabs(out_file):
+            out_file = os.path.join(os.path.dirname(__file__), out_file)
+        if os.path.exists(out_file):
+            with open(out_file, 'r', encoding='utf-8') as f:
+                res_data = json.load(f)
+                for entry in res_data.get('clouds', []):
+                    reg_email = entry.split(':')[0].strip().lower()
+                    if reg_email:
+                        registered_emails.add(reg_email)
+    except Exception:
+        pass
+
+    with open(filepath, 'r') as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+            parts = line.split(':', 1)
+            if len(parts) == 2:
+                em = parts[0].strip()
+                if em.lower() not in registered_emails:
+                    _email_pool.append({'email': em, 'password': parts[1].strip()})
+    random.shuffle(_email_pool)
+    _pool_loaded = True
+
+
+class OutOfEmailsError(Exception):
+    pass
+
+
+def get_remaining_emails() -> int:
+    global _email_pool
+    _load_pool()
+    return len(_email_pool)
+
+
+async def create_mailbox(session: aiohttp.ClientSession = None) -> dict:
+    global _email_pool
+    _load_pool()
+
+    async with _email_lock:
+        if not _email_pool:
+            raise OutOfEmailsError('Все почты из emails.txt обработаны!')
+        mailbox = _email_pool.pop(0)
+
+    return {
+        'email': mailbox['email'],
+        'password': mailbox['password'],
+        'token': None,
+    }
+
+
+async def _fetch_letters(
+    session: aiohttp.ClientSession,
+    email: str,
+    mail_password: str,
+    search: str = None,
+) -> list[dict]:
+    import config
+    api_key = getattr(config, 'NOTLETTERS_API_KEY', '')
+    if not api_key:
+        raise RuntimeError('NOTLETTERS_API_KEY не задан в config.py!')
+
+    headers = {
+        'Authorization': f'Bearer {api_key}',
+        'Content-Type': 'application/json',
+    }
+    payload = {
+        'email': email,
+        'password': mail_password,
+    }
+    if search:
+        payload['filters'] = {'search': search}
+
+    async with session.post(
+        f'{BASE_URL}/v1/letters',
+        json=payload,
+        headers=headers,
+        timeout=aiohttp.ClientTimeout(total=20),
+    ) as r:
+        if r.status != 200:
+            return []
+        data = await r.json()
+        return data.get('data', {}).get('letters', [])
+
+
+async def get_existing_message_ids(
+    session: aiohttp.ClientSession,
+    token: str = None,
+    *,
+    email: str = None,
+    mail_password: str = None,
+) -> set:
+    if not email or not mail_password:
+        return set()
+    try:
+        letters = await _fetch_letters(session, email, mail_password)
+        return {letter['id'] for letter in letters}
+    except Exception:
+        return set()
+
+
+async def wait_for_new_message(
+    session: aiohttp.ClientSession,
+    token: str = None,
+    known_ids: set = None,
+    timeout: int = 120,
+    poll_interval: int = 2,
+    *,
+    email: str = None,
+    mail_password: str = None,
+) -> str:
+    if known_ids is None:
+        known_ids = set()
+    if not email or not mail_password:
+        raise RuntimeError('email и mail_password обязательны для wait_for_new_message')
+
     deadline = asyncio.get_event_loop().time() + timeout
     while asyncio.get_event_loop().time() < deadline:
         try:
-            async with session.get(f'{BASE_URL}/messages?page=1', headers=auth_headers, timeout=aiohttp.ClientTimeout(total=15)) as r:
-                if r.status == 200:
-                    data = await r.json()
-                    members = data.get('hydra:member', [])
-                    if members:
-                        msg_id = members[0]['id']
-                        async with session.get(f'{BASE_URL}/messages/{msg_id}', headers=auth_headers, timeout=aiohttp.ClientTimeout(total=15)) as r2:
-                            if r2.status == 200:
-                                msg = await r2.json()
-                                html_parts = msg.get('html', [])
-                                text_parts = msg.get('text', [])
-                                if html_parts:
-                                    return html_parts[0]
-                                if text_parts:
-                                    return text_parts[0]
+            letters = await _fetch_letters(session, email, mail_password)
+            for letter in letters:
+                if letter['id'] not in known_ids:
+                    html = letter.get('letter', {}).get('html', '')
+                    text = letter.get('letter', {}).get('text', '')
+                    content = html or text
+                    if content:
+                        return content
         except Exception:
             pass
         await asyncio.sleep(poll_interval)
-    raise TimeoutError('mail.tm: письмо не пришло за отведённое время')
-async def wait_for_new_message(session: aiohttp.ClientSession, token: str, known_ids: set, timeout: int=120, poll_interval: int=5) -> str:
-    
-    auth_headers = {'Authorization': f'Bearer {token}', 'Accept': '*/*'}
-    deadline = asyncio.get_event_loop().time() + timeout
-    while asyncio.get_event_loop().time() < deadline:
-        try:
-            async with session.get(f'{BASE_URL}/messages?page=1', headers=auth_headers, timeout=aiohttp.ClientTimeout(total=15)) as r:
-                if r.status == 200:
-                    data = await r.json()
-                    members = data.get('hydra:member', [])
-                    for m in members:
-                        msg_id = m['id']
-                        if msg_id not in known_ids:
-                            async with session.get(f'{BASE_URL}/messages/{msg_id}', headers=auth_headers, timeout=aiohttp.ClientTimeout(total=15)) as r2:
-                                if r2.status == 200:
-                                    msg = await r2.json()
-                                    html_parts = msg.get('html', [])
-                                    text_parts = msg.get('text', [])
-                                    if html_parts:
-                                        return html_parts[0]
-                                    if text_parts:
-                                        return text_parts[0]
-        except Exception:
-            pass
-        await asyncio.sleep(poll_interval)
-    raise TimeoutError('mail.tm: новое письмо не пришло за отведённое время')
-def extract_verification_token(html: str) -> str:
-    patterns = ['token=([^"&\\s\\\']+)']
-    for pat in patterns:
-        m = re.search(pat, html)
-        if m:
-            return m.group(1)
-    raise ValueError('Не найден token в письме верификации')
+
+    raise TimeoutError(f'Новое письмо не получено за {timeout}s')
+
+
 def extract_verification_url(html: str) -> str:
-    # 1. Ссылка кнопки 'Verify your email' со ссылкой на dash.cloudflare.com/email-verification?token=
     patterns = [
-        r'<a\s+[^>]*?href=["\'](https?://dash\.cloudflare\.com/email-verification\?token=[^"\']+)["\'][^>]*>[\s\S]*?Verify\s+your\s+email',
+        r'<a\s+[^>]*?href=["\']'
+        r'(https?://dash\.cloudflare\.com/email-verification\?token=[^"\']+)'
+        r'["\'][^>]*>[\s\S]*?Verify\s+your\s+email',
         r'href=["\'](https?://dash\.cloudflare\.com/email-verification\?token=[^"\']+)["\']',
         r'href=["\'](https?://[^"\']*(?:email-verification|verify-email)[^"\']*token=[^"\']+)["\']',
-        r'(https?://dash\.cloudflare\.com/email-verification\?token=[^\s"\'<>]*)'
+        r'(https?://dash\.cloudflare\.com/email-verification\?token=[^\s"\'<>]*)',
     ]
     for pat in patterns:
         m = re.search(pat, html, re.IGNORECASE)
@@ -153,20 +176,20 @@ def extract_verification_url(html: str) -> str:
             url = m.group(1).replace('&amp;', '&')
             if 'unintended' not in url and 'delete' not in url:
                 return url
-
     raise ValueError('Не найден URL верификации в письме')
+
+
+def extract_verification_token(html: str) -> str:
+    patterns = [r'token=([^"&\s\']+)']
+    for pat in patterns:
+        m = re.search(pat, html)
+        if m:
+            return m.group(1)
+    raise ValueError('Не найден token в письме верификации')
+
+
 def extract_otp_code(html: str) -> str:
-    m = re.search('\\b(\\d{7})\\b', html)
+    m = re.search(r'\b(\d{7})\b', html)
     if m:
         return m.group(1)
     raise ValueError('Не найден 7-значный OTP-код в письме')
-async def get_existing_message_ids(session: aiohttp.ClientSession, token: str) -> set:
-    auth_headers = {'Authorization': f'Bearer {token}', 'Accept': '*/*'}
-    try:
-        async with session.get(f'{BASE_URL}/messages?page=1', headers=auth_headers, timeout=aiohttp.ClientTimeout(total=15)) as r:
-            if r.status == 200:
-                data = await r.json()
-                return {m['id'] for m in data.get('hydra:member', [])}
-    except Exception:
-        pass
-    return set()

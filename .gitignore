@@ -3,3 +3,11 @@ __pycache__/
 results.txt
 results.json
 proxies.txt
+emails.txt
+autoreger.log
+local_cache/
+python/
+vendor/
+vc_redist.x64.exe
+*.zip
+*.log

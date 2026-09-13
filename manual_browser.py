@@ -1,4 +1,31 @@
+import os
+import sys
 import asyncio
+
+# Настраиваем пути к кэшу Camoufox
+# На Windows подменяем platformdirs, на Linux стандартные пути работают нормально
+script_dir = os.path.dirname(os.path.abspath(__file__))
+local_cache_path = os.path.join(script_dir, "local_cache")
+
+if sys.platform == 'win32':
+    try:
+        import platformdirs
+        import platformdirs.windows
+        platformdirs.windows.get_win_folder_via_ctypes = lambda x: local_cache_path
+        platformdirs.windows.get_win_folder_from_registry = lambda x: local_cache_path
+        platformdirs.windows.get_win_folder_from_env_vars = lambda x: local_cache_path
+        platformdirs.windows.get_win_folder = lambda x: local_cache_path
+        platformdirs.user_cache_dir = lambda *args, **kwargs: os.path.join(local_cache_path, "camoufox", "Cache")
+        platformdirs.user_data_dir = lambda *args, **kwargs: os.path.join(local_cache_path, "camoufox")
+    except ImportError:
+        pass
+
+# Отключаем песочницу Firefox на Linux во избежание крашей seccomp
+os.environ['MOZ_DISABLE_CONTENT_SANDBOX'] = '1'
+os.environ['MOZ_DISABLE_GPU_SANDBOX'] = '1'
+os.environ['MOZ_DISABLE_RDD_SANDBOX'] = '1'
+os.environ['MOZ_DISABLE_SOCKET_PROCESS_SANDBOX'] = '1'
+
 from camoufox.async_api import AsyncCamoufox
 from urllib.parse import urlparse
 async def main():
@@ -11,7 +38,7 @@ async def main():
                 print(f'Использую прокси: {proxy}')
     except Exception:
         print('Не удалось прочитать proxies.txt, запускаю без прокси.')
-    camoufox_args = {'headless': False, 'humanize': True, 'geoip': True if proxy else False, 'os': 'windows', 'window': (1280, 800), 'firefox_user_prefs': {'intl.accept_languages': 'en-US,en'}}
+    camoufox_args = {'headless': False, 'humanize': 1.0, 'geoip': '208.67.222.222' if proxy else False, 'locale': 'en-US', 'os': 'windows', 'window': (1280, 800), 'firefox_user_prefs': {'intl.accept_languages': 'en-US,en', 'javascript.use_us_english_locale': True, 'general.useragent.locale': 'en-US'}}
     if proxy:
         proxy_str = proxy if proxy.startswith('http') else f'http://{proxy}'
         parsed = urlparse(proxy_str)

@@ -1,510 +1,553 @@
+import os
+import sys
+import subprocess
+
+_SRC_DIR = os.path.dirname(os.path.abspath(__file__))
+if _SRC_DIR not in sys.path:
+    sys.path.insert(0, _SRC_DIR)
+try:
+    os.chdir(_SRC_DIR)
+except Exception:
+    pass
+
+_CONFIG_PATH = os.path.join(_SRC_DIR, 'config.py')
+if not os.path.exists(_CONFIG_PATH):
+    _DEFAULT_CONFIG = '''THREADS = 2
+COUNT = 0
+CAPTCHA_SERVICE = 'anysolver'
+CAPTCHA_API_KEY = 'anysolver_01M1ZBD1RYM894FD4H1EAV2CK9'
+PROXIES_FILE = 'proxies.txt'
+EMAILS_FILE = 'emails.txt'
+NOTLETTERS_API_KEY = 'tSgRsPcuEZIMY5zxVYCpha88buBoSaYS'
+CLOUDFLARE_PASSWORD = 'random'
+OUTPUT_FILE = 'results.json'
+OUTPUT_FORMAT = 'json'
+MAX_RETRIES = 3
+DEBUG = False
+'''
+    try:
+        with open(_CONFIG_PATH, 'w', encoding='utf-8') as _f:
+            _f.write(_DEFAULT_CONFIG)
+    except Exception:
+        pass
+
+for _fn in ['emails.txt', 'proxies.txt']:
+    _fp = os.path.join(_SRC_DIR, _fn)
+    if not os.path.exists(_fp):
+        try:
+            with open(_fp, 'w', encoding='utf-8') as _f:
+                pass
+        except Exception:
+            pass
+
+_UI_PATH = os.path.join(_SRC_DIR, 'ui.py')
+if not os.path.exists(_UI_PATH):
+    _DEFAULT_UI = '''import time
+import asyncio
+from rich.console import Console, Group
+from rich.panel import Panel
+from rich.table import Table
+from rich.live import Live
+
+console = Console()
+
+class TerminalUI:
+    def __init__(self, threads: int, total_proxies: int):
+        self.threads = threads
+        self.total_proxies = total_proxies
+        self.start_time = time.time()
+        self.success = 0
+        self.failed = 0
+        self.emails_left = 0
+        self.alive_proxies = total_proxies
+        self.workers = {}
+        self.recent_keys = []
+        self.alerts = []
+
+    def set_stats(self, success: int, failed: int, emails_left: int, alive_proxies: int):
+        self.success = success
+        self.failed = failed
+        self.emails_left = emails_left
+        self.alive_proxies = alive_proxies
+
+    def update_worker(self, worker_id: int, email: str = "", status: str = "", proxy: str = ""):
+        now = time.time()
+        if worker_id not in self.workers:
+            self.workers[worker_id] = {'email': email, 'status': status, 'proxy': proxy, 'start': now}
+        else:
+            if email:
+                self.workers[worker_id]['email'] = email
+            if status:
+                self.workers[worker_id]['status'] = status
+            if proxy:
+                self.workers[worker_id]['proxy'] = proxy
+            if not email and not status:
+                self.workers[worker_id] = {'email': '-', 'status': '[dim]Свободен[/dim]', 'proxy': '-', 'start': now}
+
+    def add_success(self, email: str, key: str, elapsed: float):
+        self.recent_keys.insert(0, (email, key, elapsed))
+        if len(self.recent_keys) > 4:
+            self.recent_keys.pop()
+
+    def add_alert(self, alert_msg: str):
+        if alert_msg not in self.alerts:
+            self.alerts.append(alert_msg)
+
+    def render(self) -> Group:
+        elapsed = time.time() - self.start_time
+        rpm = (self.success / elapsed * 60) if elapsed >= 5 else 0.0
+
+        stats_tbl = Table.grid(expand=True, padding=(0, 2))
+        stats_tbl.add_column(ratio=1, justify="center")
+        stats_tbl.add_column(ratio=1, justify="center")
+        stats_tbl.add_column(ratio=1, justify="center")
+        stats_tbl.add_column(ratio=1, justify="center")
+        stats_tbl.add_column(ratio=1, justify="center")
+
+        emails_str = f"[bold green]{self.emails_left}[/bold green]" if self.emails_left > 10 else f"[bold yellow]{self.emails_left}[/bold yellow]" if self.emails_left > 0 else "[bold red blink]0 (НЕТ ПОЧТ)[/bold red blink]"
+        proxies_str = f"[bold green]{self.alive_proxies}/{self.total_proxies}[/bold green]" if self.alive_proxies > 0 else "[bold red blink]0 (ВСЕ ОТВАЛИЛИСЬ)[/bold red blink]"
+
+        stats_tbl.add_row(
+            f"✅ Успешно: [bold green]{self.success}[/bold green]",
+            f"❌ Ошибок: [bold red]{self.failed}[/bold red]",
+            f"🚀 Скорость: [bold cyan]{rpm:.1f}/мин[/bold cyan]",
+            f"📬 Почт в пуле: {emails_str}",
+            f"🌐 Прокси: {proxies_str}"
+        )
+
+        header_panel = Panel(
+            stats_tbl,
+            title="[bold white on dark_blue] CLOUDFLARE AUTOREGER - LIVE DASHBOARD [/bold white on dark_blue]",
+            subtitle=f"[dim]Потоков: {self.threads} | Время работы: {int(elapsed//60):02d}:{int(elapsed%60):02d}[/dim]",
+            border_style="blue"
+        )
+
+        worker_tbl = Table(expand=True, show_edge=False, box=None, header_style="bold magenta")
+        worker_tbl.add_column("#", width=4, justify="center")
+        worker_tbl.add_column("Почта", ratio=3)
+        worker_tbl.add_column("Текущий статус", ratio=3)
+        worker_tbl.add_column("Прокси", ratio=2)
+        worker_tbl.add_column("Время", width=8, justify="right")
+
+        now = time.time()
+        for wid in range(1, self.threads + 1):
+            w = self.workers.get(wid, {'email': '-', 'status': '[dim]Ожидание задачи[/dim]', 'proxy': '-', 'start': now})
+            dur = int(now - w['start'])
+            dur_str = f"{dur}s" if w['email'] != '-' else "-"
+            short_p = w['proxy'].split('@')[-1] if '@' in w['proxy'] else w['proxy']
+            worker_tbl.add_row(
+                f"[bold cyan]{wid}[/bold cyan]",
+                w['email'],
+                w['status'],
+                short_p or "-",
+                dur_str
+            )
+
+        workers_panel = Panel(worker_tbl, title="[bold]Активные потоки[/bold]", border_style="cyan")
+        components = [header_panel, workers_panel]
+
+        if self.alerts:
+            alert_text = "\\n".join([f"[bold red]⚠️ {a}[/bold red]" for a in self.alerts])
+            components.append(Panel(alert_text, title="[bold red]ВНИМАНИЕ[/bold red]", border_style="red"))
+
+        if self.recent_keys:
+            recent_tbl = Table(expand=True, show_edge=False, box=None)
+            recent_tbl.add_column("Email", ratio=3, style="dim")
+            recent_tbl.add_column("Global API Key", ratio=4, style="bold green")
+            recent_tbl.add_column("Время", width=8, justify="right", style="cyan")
+
+            for em, k, t in self.recent_keys:
+                recent_tbl.add_row(em, k, f"{t:.1f}s")
+
+            components.append(Panel(recent_tbl, title="[bold green]Последние зарегистрированные аккаунты[/bold green]", border_style="green"))
+
+        return Group(*components)
+'''
+    try:
+        with open(_UI_PATH, 'w', encoding='utf-8') as _f:
+            _f.write(_DEFAULT_UI)
+    except Exception:
+        pass
+
+def _ensure_deps():
+    reqs = ['curl_cffi', 'aiohttp', 'aiofiles', 'certifi', 'rich']
+    missing = []
+    for mod in reqs:
+        try:
+            __import__(mod)
+        except ImportError:
+            missing.append(mod)
+    if missing:
+        req_file = os.path.join(_SRC_DIR, 'requirements.txt')
+        cmd = [sys.executable, '-m', 'pip', 'install', '-r', req_file] if os.path.exists(req_file) else [sys.executable, '-m', 'pip', 'install'] + missing
+        try:
+            subprocess.check_call(cmd, cwd=_SRC_DIR)
+        except Exception:
+            pass
+
+_ensure_deps()
+
 import asyncio
 import argparse
 import logging
 import random
 import socket
 import ssl
-import sys
 import time
+import urllib.parse
 import aiohttp
 import config
 import mail_tm
-import turnstile
-import cloudflare_api as cf_api
 import proxy_utils
 import results as res_module
-import verify_browser
-from cloudflare_api import _make_session
+import cloudflare_api as cf_api
+import turnstile
+
+try:
+    from ui import TerminalUI, console
+    from rich.live import Live
+    HAS_UI = True
+except Exception:
+    HAS_UI = False
+    TerminalUI = None
+    console = None
+    Live = None
+
+logger = logging.getLogger(__name__)
+
 
 def generate_random_password(length: int = 16) -> str:
     import string
-    lower = string.ascii_lowercase
-    upper = string.ascii_uppercase
-    digits = string.digits
-    special = "!@#$%^&*"
-    # Гарантируем буквы в начале и в конце, чтобы Cloudflare не ругался на спецсимволы по краям
-    password = [
-        random.choice(lower),
-        random.choice(upper),
-        random.choice(digits),
-        random.choice(special)
+    chars = string.ascii_letters + string.digits + '!@#$%^&*'
+    pwd = [
+        random.choice(string.ascii_lowercase),
+        random.choice(string.ascii_uppercase),
+        random.choice(string.digits),
+        random.choice('!@#$%^&*')
     ]
-    all_chars = lower + upper + digits + special
-    password += [random.choice(all_chars) for _ in range(max(0, length - 4))]
-    random.shuffle(password)
-    res = "".join(password).strip()
-    return res
+    pwd += [random.choice(chars) for _ in range(max(0, length - 4))]
+    random.shuffle(pwd)
+    return ''.join(pwd)
 
-def setup_logging(debug: bool=False):
+
+def setup_logging(debug: bool = False, use_ui: bool = True):
     level = logging.DEBUG if debug else logging.INFO
     fmt = '%(asctime)s [%(levelname)s] %(message)s'
-    logging.basicConfig(level=level, format=fmt, stream=sys.stdout)
-    logging.getLogger("pycares").setLevel(logging.ERROR)
-    logging.getLogger("aiodns").setLevel(logging.ERROR)
-logger = logging.getLogger(__name__)
-class ProxyClientSession(aiohttp.ClientSession):
-    def __init__(self, *args, proxy_url: str | None=None, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.proxy_url = proxy_url
-    async def _request(self, method, str_or_url, **kwargs):
-        if self.proxy_url and 'proxy' not in kwargs:
-            kwargs['proxy'] = self.proxy_url
-        return await super()._request(method, str_or_url, **kwargs)
+    if use_ui and HAS_UI:
+        log_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'autoreger.log')
+        logging.basicConfig(level=level, format=fmt, filename=log_file, filemode='a', force=True)
+    else:
+        logging.basicConfig(level=level, format=fmt, stream=sys.stdout, force=True)
+    logging.getLogger('pycares').setLevel(logging.ERROR)
+    logging.getLogger('aiodns').setLevel(logging.ERROR)
+
+
 class Stats:
     def __init__(self):
         self.success = 0
         self.failed = 0
         self._lock = asyncio.Lock()
         self._start = time.time()
+
     async def inc_success(self):
         async with self._lock:
             self.success += 1
+
     async def inc_failed(self):
         async with self._lock:
             self.failed += 1
+
     def summary(self) -> str:
         elapsed = time.time() - self._start
-        rpm = self.success / elapsed * 60 if elapsed > 0 else 0
-        return f'✅ {self.success} | ❌ {self.failed} | ⏱ {elapsed:.0f}s | 🚀 {rpm:.1f}/min'
-async def register_one(proxy: str | None, stats: Stats, debug: bool=False) -> bool:
-    """Регистрация одного аккаунта."""
+        rpm = self.success / elapsed * 60 if elapsed >= 5 else 0
+        return f'✅ {self.success} | ❌ {self.failed} | ⏱ {elapsed:.1f}s | 🚀 {rpm:.1f}/min'
+
+
+async def register_one(worker_id: int, proxy_pool: proxy_utils.ProxyPool, stats: Stats, ui: TerminalUI | None, shutdown: asyncio.Event, debug: bool = False) -> bool:
+    proxy = proxy_pool.get()
+    if proxy_pool.is_empty and proxy_pool.total_count > 0:
+        if ui:
+            ui.add_alert("Все прокси в пуле перестали отвечать!")
+        logger.error("Все прокси в пуле недоступны!")
+        shutdown.set()
+        return False
+
     step = 'init'
     email = mail_email = mail_pass = cloud_pass = api_key = ''
-    reg_cookies = []
-    startup_jitter = random.uniform(1, 5)
-    logger.info(f'⏳ Задержка перед стартом: {startup_jitter:.0f}s (anti-rate-limit)')
-    await asyncio.sleep(startup_jitter)
+    start_t = time.time()
     try:
         step = 'createMail'
-        proxy_url = proxy if proxy and (proxy.startswith('http://') or proxy.startswith('https://')) else f'http://{proxy}' if proxy else None
-        _mail_ssl = ssl.create_default_context()
-        _mail_ssl.check_hostname = False
-        _mail_ssl.verify_mode = ssl.CERT_NONE
-        _mail_connector = aiohttp.TCPConnector(family=socket.AF_INET, ssl=_mail_ssl)
-        async with ProxyClientSession(connector=_mail_connector, proxy_url=proxy_url) as mail_session:
+        if ui:
+            ui.update_worker(worker_id, "-", "[dim]Получение почты...[/dim]", proxy or "-")
+        ssl_ctx = ssl.create_default_context()
+        ssl_ctx.check_hostname = False
+        ssl_ctx.verify_mode = ssl.CERT_NONE
+        connector = aiohttp.TCPConnector(family=socket.AF_INET, ssl=ssl_ctx)
+
+        async with aiohttp.ClientSession(connector=connector) as mail_session:
             mailbox = await mail_tm.create_mailbox(mail_session)
             mail_email = mailbox['email']
             mail_pass = mailbox['password']
             mail_token = mailbox['token']
+            email = mail_email
+
             if config.CLOUDFLARE_PASSWORD == 'random':
                 cloud_pass = generate_random_password()
             else:
                 cloud_pass = config.CLOUDFLARE_PASSWORD
-            email = mail_email
-            logger.info(f'📧 [{email}] Почта создана')
-            # Запоминаем known_ids ДО регистрации — письмо может прийти во время signup
-            known_ids = await mail_tm.get_existing_message_ids(mail_session, mail_token)
-            step = 'signup'
-            signup_ok = False
-            reg_cookies = []
-            
-            # Регистрация через браузер — Turnstile решается автоматически
-            logger.info(f'🌐 [{email}] Регистрация через браузер...')
 
-            # after_signup_callback: вызывается в ТОМ ЖЕ браузере сразу после регистрации
-            async def after_signup_callback(page):
-                logger.info(f'📨 [{email}] Аккаунт создан. Ждём письмо верификации...')
-                html = await mail_tm.wait_for_new_message(mail_session, mail_token, known_ids, timeout=180, poll_interval=2)
-                verify_url = mail_tm.extract_verification_url(html)
-                logger.info(f'🔗 [{email}] Ссылка верификации получена: {verify_url}')
-
-                # Открываем ссылку верификации В НОВОЙ ВКЛАДКЕ
-                logger.info(f'🌐 [{email}] Открываем новую вкладку для перехода по ссылке верификации...')
-                verify_tab = await page.context.new_page()
-                try:
-                    logger.info(f'🔗 [{email}] Переходим по ссылке: {verify_url}')
-                    await verify_tab.goto(verify_url, wait_until='domcontentloaded', timeout=60000)
-                    await asyncio.sleep(2)
-
-                    # Проверяем и решаем WAF Challenge на странице верификации
-                    logger.info(f'🔐 [{email}] Проверяем WAF Turnstile на странице верификации...')
-                    for _waf in range(8):
-                        await asyncio.sleep(1.2)
-                        cf_frames = [f for f in verify_tab.frames if 'challenges.cloudflare.com' in f.url or 'challenge-platform' in f.url]
-                        try:
-                            pt = await verify_tab.evaluate('document.body?.innerText || ""')
-                        except Exception:
-                            pt = ''
-                        is_waf = any(kw in pt.lower() for kw in ['security verification', 'verify you are human', 'just a moment'])
-
-                        if cf_frames or is_waf:
-                            logger.info(f'🔐 [{email}] Решаем WAF Challenge на странице верификации (раунд {_waf+1})...')
-                            await verify_browser.bypass_turnstile_safely(verify_tab, timeout=12000, max_attempts=3)
-                            await asyncio.sleep(2)
-                        else:
-                            if _waf >= 2:
-                                break
-
-                    # Ожидаем подтверждения и редиректа в новой вкладке
-                    logger.info(f'⏳ [{email}] Ожидаем подтверждения в новой вкладке...')
-                    for _wv in range(15):
-                        await asyncio.sleep(1)
-                        cur_url = verify_tab.url or ''
-                        try:
-                            p_txt = await verify_tab.evaluate('document.body?.innerText?.toLowerCase() || ""')
-                        except Exception:
-                            p_txt = ''
-                        
-                        # Если страница ушла со страницы верификации на дашборд — почта подтверждена!
-                        if 'email-verification' not in cur_url and 'token=' not in cur_url and len(cur_url) > 20:
-                            logger.info(f'✅ [{email}] Редирект с email-verification на дашборд ({cur_url}) — подтверждено!')
-                            break
-                        if 'verified' in p_txt or 'confirmed' in p_txt or any(p in cur_url for p in ['/home', '/overview', '/websites']):
-                            logger.info(f'✅ [{email}] Новая вкладка подтвердила верификацию email (url={cur_url})!')
-                            break
-                except Exception as ve:
-                    logger.warning(f'verify_tab error: {ve}')
-                finally:
-                    try:
-                        await verify_tab.close()
-                        logger.info(f'🌐 [{email}] Вкладка верификации закрыта')
-                    except Exception:
-                        pass
-
-                await asyncio.sleep(1)
-
-                # ── Теперь переходим на /profile/api-tokens в основной сессии ──
-                logger.info(f'🔑 [{email}] Переходим на /profile/api-tokens...')
-                try:
-                    await page.goto('https://dash.cloudflare.com/profile/api-tokens', wait_until='domcontentloaded', timeout=60000)
-                except Exception as te:
-                    logger.warning(f'goto /profile/api-tokens: {te}')
-                await asyncio.sleep(3)
-                await verify_browser.dismiss_cookie_banner(page)
-
-                # Запоминаем текущие msg ids ДО нажатия Send Code
-                known_ids_otp = await mail_tm.get_existing_message_ids(mail_session, mail_token)
-
-                # Кликаем View на Global API Key
-                logger.info(f'👆 [{email}] Кликаем View...')
-                for _v in range(10):
-                    try:
-                        clicked = await page.evaluate('''() => {
-                            const rows = document.querySelectorAll('tr, div[class*="row"], div[class*="item"]');
-                            for (const row of rows) {
-                                if (row.innerText && row.innerText.includes('Global API Key')) {
-                                    const btn = row.querySelector('button, a');
-                                    if (btn && (btn.innerText.includes('View') || btn.textContent.includes('View'))) {
-                                        btn.click();
-                                        return true;
-                                    }
-                                }
-                            }
-                            const allBtns = document.querySelectorAll('button');
-                            for (const b of allBtns) {
-                                if (b.innerText.trim() === 'View' || b.textContent.trim() === 'View') {
-                                    b.click();
-                                    return true;
-                                }
-                            }
-                            return false;
-                        }''')
-                        if clicked:
-                            logger.info(f'✅ [{email}] View нажат')
-                            break
-                    except Exception:
-                        pass
-                    await asyncio.sleep(1)
-
-                await asyncio.sleep(1.5)
-
-                # Кликаем Send Verification Code
-                logger.info(f'📨 [{email}] Ищем кнопку Send Verification Code...')
-                for _s in range(10):
-                    try:
-                        sent = await page.evaluate('''() => {
-                            const dlg = document.querySelector('div[role="dialog"], [data-modal], [aria-modal="true"]');
-                            if (!dlg) return false;
-                            const btns = dlg.querySelectorAll('button');
-                            for (const b of btns) {
-                                const txt = (b.innerText || b.textContent || '').toLowerCase();
-                                if (txt.includes('send') && !txt.includes('cancel') && !b.disabled) {
-                                    b.click();
-                                    return true;
-                                }
-                            }
-                            return false;
-                        }''')
-                        if sent:
-                            logger.info(f'✅ [{email}] Send Verification Code нажат')
-                            break
-                    except Exception:
-                        pass
-                    await asyncio.sleep(1)
-
-                # Ждём OTP из почты
-                logger.info(f'📨 [{email}] Ждём OTP-код...')
-                html2 = await mail_tm.wait_for_new_message(mail_session, mail_token, known_ids_otp, timeout=120, poll_interval=2)
-                otp_code = mail_tm.extract_otp_code(html2)
-                logger.info(f'🔢 [{email}] OTP получен: {otp_code}')
-
-                # Вводим OTP в поле модалки
-                logger.info(f'✏️ [{email}] Вводим OTP...')
-                await asyncio.sleep(1)
-                try:
-                    await page.evaluate('''(code) => {
-                        const dlg = document.querySelector('div[role="dialog"], [data-modal], [aria-modal="true"]');
-                        if (!dlg) return;
-                        const inputs = dlg.querySelectorAll('input[type="text"], input[type="number"], input:not([type="hidden"])');
-                        for (const inp of inputs) {
-                            if (inp.type !== 'hidden') {
-                                const s = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
-                                s.call(inp, code);
-                                inp.dispatchEvent(new Event("input", {bubbles: true}));
-                                inp.dispatchEvent(new Event("change", {bubbles: true}));
-                                break;
-                            }
-                        }
-                    }''', otp_code)
-                    logger.info(f'✅ [{email}] OTP введён')
-                except Exception as e:
-                    logger.warning(f'OTP fill error: {e}')
-
-                # Решаем Turnstile в модалке КЛИКОМ (тот же IP = нет 1201)
-                logger.info(f'🔐 [{email}] Решаем Turnstile кликом...')
-                await asyncio.sleep(1)
-                await verify_browser.bypass_turnstile_safely(page, timeout=15000, max_attempts=3)
-
-                # Перехватчик ответа api_key
-                captured_api_key = None
-                async def _on_api_key_response(response):
-                    nonlocal captured_api_key
-                    if '/user/api_key' not in response.url:
-                        return
-                    try:
-                        body = await response.json()
-                        logger.info(f'🔑 [{email}] api_key response: {body}')
-                        if body.get('success'):
-                            ak = (body.get('result') or {}).get('api_key')
-                            if ak:
-                                captured_api_key = ak
-                    except Exception:
-                        pass
-                page.on('response', _on_api_key_response)
-
-                # Нажимаем кнопку Submit в модалке (именно внутри dialog, исключая Cancel и Send)
-                logger.info(f'📤 [{email}] Нажимаем Submit в модалке...')
-                await asyncio.sleep(0.5)
-                try:
-                    btn_text = await page.evaluate('''() => {
-                        const dlg = document.querySelector('div[role="dialog"], [data-modal], [aria-modal="true"]');
-                        if (!dlg) return 'no_dialog';
-                        const btns = Array.from(dlg.querySelectorAll('button'));
-                        const names = btns.map(b => (b.innerText || b.textContent || '').trim());
-                        
-                        // 1. Ищем явные целевые кнопки: View, Submit, Confirm, Verify
-                        for (const b of btns) {
-                            const txt = (b.innerText || b.textContent || '').trim().toLowerCase();
-                            if ((txt === 'view' || txt === 'submit' || txt === 'confirm' || txt === 'verify') && !b.disabled) {
-                                b.click();
-                                return 'clicked_primary: ' + txt;
-                            }
-                        }
-                        
-                        // 2. Fallback: любая активная кнопка внутри диалога кроме Cancel и Send
-                        for (const b of btns) {
-                            const txt = (b.innerText || b.textContent || '').trim();
-                            const low = txt.toLowerCase();
-                            if (low.includes('cancel') || low.includes('send') || low.includes('close')) continue;
-                            if (!b.disabled && txt.length > 0) {
-                                b.click();
-                                return 'clicked_fallback: ' + txt;
-                            }
-                        }
-                        return 'not_found: ' + names.join(', ');
-                    }''')
-                    logger.info(f'📤 [{email}] Submit result: {btn_text}')
-                except Exception as e:
-                    logger.warning(f'Submit error: {e}')
-
-                # Ждём ответ с ключом
-                logger.info(f'⏳ [{email}] Ждём ответ с API ключом...')
-                for _w in range(30):
-                    await asyncio.sleep(1)
-                    if captured_api_key:
-                        logger.info(f'🗝️ [{email}] ✅ API Key перехвачен: {captured_api_key}')
-                        return captured_api_key
-
-                    # Fallback 1: читаем из DOM диалога (если ключ отобразился в инпуте после подтверждения)
-                    try:
-                        modal_val = await page.evaluate('''() => {
-                            const dlg = document.querySelector('div[role="dialog"], [data-modal], [aria-modal="true"]');
-                            if (!dlg) return null;
-                            const els = dlg.querySelectorAll('input, code, pre, span, p');
-                            for (const el of els) {
-                                const v = (el.value || el.innerText || el.textContent || '').trim();
-                                if ((v.startsWith('cfk_') || /^[a-f0-9]{37,}$/i.test(v)) && !v.includes(' ')) {
-                                    return v;
-                                }
-                            }
-                            return null;
-                        }''')
-                        if modal_val:
-                            logger.info(f'🗝️ [{email}] ✅ API Key из DOM модалки: {modal_val}')
-                            return modal_val
-                    except Exception:
-                        pass
-
-                    # Fallback 2: ищем через fetch bootstrap
-                    try:
-                        check = await page.evaluate('''() =>
-                            fetch('/api/v4/system/bootstrap', {
-                                headers: {'Accept': 'application/json', 'X-Cross-Site-Security': 'dash'}
-                            }).then(r => r.json())
-                        ''')
-                        ak = (check.get('result') or {}).get('api_key')
-                        if ak and len(ak) >= 32:
-                            logger.info(f'🗝️ [{email}] ✅ API Key из bootstrap: {ak}')
-                            return ak
-                    except Exception:
-                        pass
-
-                logger.warning(f'⚠️ [{email}] API Key не получен')
-                return None
-
-            signup_ok, api_key = await verify_browser.signup_via_browser(
-                email, cloud_pass, proxy, after_signup_callback=after_signup_callback
+            known_ids = await mail_tm.get_existing_message_ids(
+                mail_session, mail_token, email=mail_email, mail_password=mail_pass
             )
-            if not signup_ok:
-                raise RuntimeError('signup_via_browser failed')
-            logger.info(f'🆔 [{email}] Аккаунт создан через браузер')
-            if not api_key:
-                raise RuntimeError('Не удалось получить Global API Key через браузер')
+
+            step = 'turnstile_signup'
+            if ui:
+                ui.update_worker(worker_id, email, "[cyan]Решение Turnstile (signup)...[/cyan]", proxy or "-")
+            else:
+                logger.info(f'[{email}] Решение капчи signup...')
+
+            cf_challenge_signup = await turnstile.solve_turnstile(action='signup', proxy=proxy)
+
+            step = 'create_user'
+            if ui:
+                ui.update_worker(worker_id, email, "[blue]Создание пользователя...[/blue]", proxy or "-")
+
+            cf_session = cf_api._make_session(proxy)
+            async with cf_session:
+                sec_token = await cf_api.get_security_token(cf_session)
+                await cf_api.create_user(cf_session, email, cloud_pass, sec_token, cf_challenge_signup)
+
+                step = 'wait_verify_email'
+                if ui:
+                    ui.update_worker(worker_id, email, "[yellow]Ожидание ссылки...[/yellow]", proxy or "-")
+
+                html = await mail_tm.wait_for_new_message(
+                    mail_session, mail_token, known_ids, timeout=90, poll_interval=0.5,
+                    email=mail_email, mail_password=mail_pass
+                )
+                verify_token = mail_tm.extract_verification_token(html)
+
+                step = 'verify_email'
+                if ui:
+                    ui.update_worker(worker_id, email, "[blue]Верификация email...[/blue]", proxy or "-")
+                await cf_api.verify_email(cf_session, verify_token)
+
+                step = 'reauthenticate'
+                known_ids_otp = await mail_tm.get_existing_message_ids(
+                    mail_session, mail_token, email=mail_email, mail_password=mail_pass
+                )
+                await cf_api.reauthenticate(cf_session)
+
+                step = 'wait_otp_and_turnstile'
+                if ui:
+                    ui.update_worker(worker_id, email, "[yellow]Ожидание OTP + Капча...[/yellow]", proxy or "-")
+
+                async def _get_otp():
+                    h_otp = await mail_tm.wait_for_new_message(
+                        mail_session, mail_token, known_ids_otp, timeout=90, poll_interval=0.5,
+                        email=mail_email, mail_password=mail_pass
+                    )
+                    return mail_tm.extract_otp_code(h_otp)
+
+                async def _get_turnstile():
+                    return await turnstile.solve_turnstile(action='onboarding', proxy=proxy)
+
+                otp_code, cf_challenge_key = await asyncio.gather(_get_otp(), _get_turnstile())
+
+                step = 'get_api_key'
+                if ui:
+                    ui.update_worker(worker_id, email, "[green]Запрос Global API Key...[/green]", proxy or "-")
+
+                api_key = await cf_api.get_global_api_key(cf_session, otp_code, cf_challenge_key)
+                if not api_key:
+                    raise RuntimeError('Global API Key не получен')
 
         step = 'save'
         await res_module.save_result(config.OUTPUT_FILE, email=mail_email, mail_password=mail_pass, cloud_password=cloud_pass, api_key=api_key, fmt=config.OUTPUT_FORMAT)
-        logger.info(f'💾 [{email}] → {config.OUTPUT_FILE}')
+        elapsed_one = time.time() - start_t
         await stats.inc_success()
+        proxy_pool.report_success(proxy)
+        logger.info(f'[{email}] Успешно: {api_key} ({elapsed_one:.1f}s)')
+        if ui:
+            ui.add_success(email, api_key, elapsed_one)
+            ui.update_worker(worker_id, "-", "[dim]Свободен[/dim]", "-")
         return True
+    except mail_tm.OutOfEmailsError:
+        logger.warning("Все почты в emails.txt обработаны!")
+        if ui:
+            ui.add_alert("Все почты в emails.txt закончились! Регистрация остановлена.")
+            ui.update_worker(worker_id, "-", "[red]Почты закончились[/red]", "-")
+        shutdown.set()
+        return False
     except Exception as e:
-        logger.error(f"❌ [{email or 'N/A'}] Шаг [{step}]: {e}")
+        if proxy and any(err_kw in str(e) for err_kw in ("Proxy", "Connection", "Timeout", "429", "Connect", "502", "504")):
+            proxy_pool.report_failure(proxy, reason=str(e)[:30])
+        await stats.inc_failed()
+        logger.error(f"❌ [{email or 'N/A'}] {e}")
+        if ui:
+            ui.update_worker(worker_id, email or "-", f"[red]Ошибка ({step})[/red]", proxy or "-")
         if debug:
             logger.exception('Traceback:')
-        await stats.inc_failed()
         return False
-async def run_forever(count: int | None, proxy_pool: proxy_utils.ProxyPool, debug: bool):
+
+
+async def run_forever(count: int | None, proxy_pool: proxy_utils.ProxyPool, debug: bool, use_ui: bool = True):
     semaphore = asyncio.Semaphore(config.THREADS)
     stats = Stats()
     tasks = []
     shutdown = asyncio.Event()
+
+    ui = TerminalUI(threads=config.THREADS, total_proxies=proxy_pool.total_count) if (use_ui and HAS_UI and TerminalUI) else None
+
+    worker_slots = asyncio.Queue()
+    for i in range(1, config.THREADS + 1):
+        worker_slots.put_nowait(i)
+
     async def worker():
         if shutdown.is_set():
             return False
-        async with semaphore:
-            if shutdown.is_set():
-                return False
-            proxy = proxy_pool.get()
-            ok = await register_one(proxy, stats, debug=debug)
-            logger.info(f'📊 {stats.summary()}')
-            return ok
-    try:
+        wid = await worker_slots.get()
+        try:
+            async with semaphore:
+                if shutdown.is_set():
+                    return False
+                return await register_one(wid, proxy_pool, stats, ui, shutdown, debug=debug)
+        finally:
+            worker_slots.put_nowait(wid)
+
+    async def ui_loop(live):
+        while not shutdown.is_set():
+            try:
+                emails_left = mail_tm.get_remaining_emails()
+                alive_p = proxy_pool.alive_count
+                ui.set_stats(stats.success, stats.failed, emails_left, alive_p)
+                live.update(ui.render())
+            except Exception:
+                pass
+            await asyncio.sleep(0.3)
+        try:
+            emails_left = mail_tm.get_remaining_emails()
+            ui.set_stats(stats.success, stats.failed, emails_left, proxy_pool.alive_count)
+            live.update(ui.render())
+        except Exception:
+            pass
+
+    async def execute_batch():
         if count:
             tasks = [asyncio.create_task(worker()) for _ in range(count)]
             await asyncio.gather(*tasks, return_exceptions=True)
         else:
             while not shutdown.is_set():
-                active = sum((1 for t in tasks if not t.done()))
-                while active < config.THREADS:
+                active = sum(1 for t in tasks if not t.done())
+                while active < config.THREADS and not shutdown.is_set():
                     tasks.append(asyncio.create_task(worker()))
                     active += 1
                 await asyncio.sleep(0.2)
                 tasks = [t for t in tasks if not t.done()]
+
+    try:
+        if use_ui and ui:
+            with Live(ui.render(), console=console, refresh_per_second=4) as live:
+                ui_task = asyncio.create_task(ui_loop(live))
+                await execute_batch()
+                shutdown.set()
+                await ui_task
+        else:
+            await execute_batch()
     except asyncio.CancelledError:
         pass
     finally:
         shutdown.set()
         pending = [t for t in tasks if not t.done()]
         if pending:
-            logger.info(f'⏳ Ожидаем завершения {len(pending)} задач...')
             done, still_pending = await asyncio.wait(pending, timeout=5)
             for t in still_pending:
                 t.cancel()
-        logger.info(f'\n🏁 Итого: {stats.summary()}')
+        if not use_ui:
+            logger.info(f'\n🏁 Итого: {stats.summary()}')
+
+
 def parse_args():
     p = argparse.ArgumentParser(description='Cloudflare Autoreger + Global API Key')
-    p.add_argument('--count', type=int, default=None, help='Кол-во аккаунтов (по умолчанию из config.COUNT)')
-    p.add_argument('--threads', type=int, default=None, help=f'Потоков (default: {config.THREADS})')
+    p.add_argument('--count', type=int, default=None)
+    p.add_argument('--threads', type=int, default=None)
     p.add_argument('--proxy-file', type=str, default=None)
     p.add_argument('--output', type=str, default=None)
+    p.add_argument('--no-ui', action='store_true', help='Disable live UI dashboard')
     p.add_argument('--debug', action='store_true')
     return p.parse_args()
-async def run_diagnostics(proxy: str | None):
-    """Диагностика окружения при старте — проверяет все критические зависимости."""
-    import platform
-    logger.info('=' * 60)
-    logger.info('🔍 ДИАГНОСТИКА ОКРУЖЕНИЯ')
-    logger.info(f'   OS: {platform.system()} {platform.release()} ({platform.machine()})')
-    logger.info(f'   Python: {sys.version}')
-    logger.info(f'   Event Loop: {type(asyncio.get_event_loop()).__name__}')
 
-    # 1. Проверка curl_cffi
+
+async def run_diagnostics(proxy: str | None):
+    logger.info('=' * 60)
+    logger.info('🔍 Проверка окружения')
+    try:
+        ssl_ctx = ssl.create_default_context()
+        ssl_ctx.check_hostname = False
+        ssl_ctx.verify_mode = ssl.CERT_NONE
+        conn = aiohttp.TCPConnector(family=socket.AF_INET, ssl=ssl_ctx)
+        api_key = getattr(config, 'NOTLETTERS_API_KEY', '')
+        if not api_key:
+            logger.error('❌ NOTLETTERS_API_KEY не указан в config.py')
+        else:
+            async with aiohttp.ClientSession(connector=conn) as s:
+                async with s.get(
+                    'https://api.notletters.com/v1/me',
+                    headers={'Authorization': f'Bearer {api_key}'},
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as r:
+                    if r.status == 200:
+                        data = await r.json()
+                        bal = data.get('data', {}).get('balance', '?')
+                        logger.info(f'✅ NotLetters API: OK (баланс: {bal})')
+                    else:
+                        logger.warning(f'⚠️ NotLetters API: HTTP {r.status}')
+    except Exception as e:
+        logger.warning(f'⚠️ NotLetters API error: {e}')
+
+    try:
+        mail_tm._load_pool()
+        logger.info(f'✅ emails.txt: {len(mail_tm._email_pool)} почт готово к регистрации')
+    except Exception as e:
+        logger.error(f'❌ Ошибка загрузки emails.txt: {e}')
+
+    try:
+        if config.CAPTCHA_API_KEY:
+            ssl_ctx2 = ssl.create_default_context()
+            ssl_ctx2.check_hostname = False
+            ssl_ctx2.verify_mode = ssl.CERT_NONE
+            conn2 = aiohttp.TCPConnector(family=socket.AF_INET, ssl=ssl_ctx2)
+            async with aiohttp.ClientSession(connector=conn2) as s:
+                async with s.post(
+                    'https://api.anysolver.com/getBalance',
+                    json={'clientKey': config.CAPTCHA_API_KEY},
+                    timeout=aiohttp.ClientTimeout(total=10)
+                ) as r:
+                    if r.status == 200:
+                        data = await r.json()
+                        logger.info(f'✅ AnySolver API: OK (баланс: ${data.get("balance", "?")})')
+                    else:
+                        logger.warning(f'⚠️ AnySolver API: HTTP {r.status}')
+    except Exception as e:
+        logger.warning(f'⚠️ AnySolver API error: {e}')
+
     try:
         from curl_cffi.requests import AsyncSession
-        async with AsyncSession(impersonate='chrome124') as s:
-            r = await s.get('https://dash.cloudflare.com/api/v4/system/bootstrap', timeout=15)
-            logger.info(f'   ✅ curl_cffi → Cloudflare API: OK (status={r.status_code})')
-    except Exception as e:
-        logger.error(f'   ❌ curl_cffi → Cloudflare API: {type(e).__name__}: {e}')
-
-    # 2. Проверка aiohttp БЕЗ прокси → mail.tm
-    try:
-        _ssl = ssl.create_default_context()
-        _ssl.check_hostname = False
-        _ssl.verify_mode = ssl.CERT_NONE
-        conn = aiohttp.TCPConnector(family=socket.AF_INET, ssl=_ssl)
-        async with aiohttp.ClientSession(connector=conn) as s:
-            async with s.get('https://api.mail.tm/domains?page=1', timeout=aiohttp.ClientTimeout(total=15)) as r:
-                logger.info(f'   ✅ aiohttp (без прокси) → mail.tm: OK (status={r.status})')
-    except Exception as e:
-        logger.error(f'   ❌ aiohttp (без прокси) → mail.tm: {type(e).__name__}: {e}')
-
-    # 3. Проверка aiohttp ЧЕРЕЗ прокси → mail.tm
-    if proxy:
-        proxy_url = proxy if proxy.startswith('http://') or proxy.startswith('https://') else f'http://{proxy}'
-        try:
-            _ssl2 = ssl.create_default_context()
-            _ssl2.check_hostname = False
-            _ssl2.verify_mode = ssl.CERT_NONE
-            conn2 = aiohttp.TCPConnector(family=socket.AF_INET, ssl=_ssl2)
-            async with aiohttp.ClientSession(connector=conn2) as s:
-                async with s.get('https://api.mail.tm/domains?page=1', proxy=proxy_url, timeout=aiohttp.ClientTimeout(total=15)) as r:
-                    logger.info(f'   ✅ aiohttp (через прокси) → mail.tm: OK (status={r.status})')
-        except Exception as e:
-            logger.error(f'   ❌ aiohttp (через прокси) → mail.tm: {type(e).__name__}: {e}')
-            logger.error(f'      Прокси: {proxy_url}')
-            logger.info(f'   💡 Совет: если aiohttp без прокси работает, а через прокси нет —')
-            logger.info(f'      попробуйте формат прокси: http://user:pass@host:port')
-            logger.info(f'      или проверьте, что прокси поддерживает HTTPS CONNECT')
-
-        # 4. Проверка curl_cffi ЧЕРЕЗ прокси → mail.tm
-        try:
-            from curl_cffi.requests import AsyncSession
-            async with AsyncSession(impersonate='chrome124', proxies={'http': proxy_url, 'https': proxy_url}) as s:
-                r = await s.get('https://api.mail.tm/domains?page=1', timeout=15)
-                logger.info(f'   ✅ curl_cffi (через прокси) → mail.tm: OK (status={r.status_code})')
-        except Exception as e:
-            logger.error(f'   ❌ curl_cffi (через прокси) → mail.tm: {type(e).__name__}: {e}')
-    else:
-        logger.info('   ⏭️  Прокси не указан, пропускаем проверку через прокси')
-
-    # 5. Проверка Camoufox
-    try:
-        from camoufox.async_api import AsyncCamoufox
-        logger.info(f'   ✅ Camoufox: импорт OK')
+        logger.info('✅ curl_cffi (pure requests engine): OK')
     except ImportError as e:
-        logger.error(f'   ❌ Camoufox: {e}')
-        logger.info(f'      Установите: pip install camoufox && python -m camoufox fetch')
-
+        logger.error(f'❌ curl_cffi не установлен: {e}')
     logger.info('=' * 60)
 
+
 def main():
-    # Windows: принудительно используем SelectorEventLoop,
-    # тк. ProactorEventLoop ломает aiohttp HTTPS-прокси на Windows
     if sys.platform == 'win32':
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     args = parse_args()
     debug = args.debug or config.DEBUG
-    setup_logging(debug)
+    use_ui = not args.no_ui and not debug and HAS_UI
+
+    setup_logging(debug, use_ui=False)
+
     if args.threads:
         config.THREADS = args.threads
     if args.output:
@@ -512,20 +555,27 @@ def main():
     count = args.count if args.count else config.COUNT if config.COUNT else None
     proxy_file = args.proxy_file or config.PROXIES_FILE
     proxy_pool = proxy_utils.ProxyPool.from_file(proxy_file)
+
     if proxy_pool.is_empty:
-        logger.warning('⚠️ Прокси не загружены — работаем без прокси')
+        logger.warning('Прокси не найдены — работа без прокси')
     else:
-        logger.info(f'🌐 Загружено {len(proxy_pool)} прокси')
-    logger.info(f"🚀 threads={config.THREADS} | output={config.OUTPUT_FILE} | count={('∞' if not count else count)}")
+        logger.info(f'Загружено {len(proxy_pool)} прокси')
+
+    logger.info(f"Потоки: {config.THREADS} | Вывод: {config.OUTPUT_FILE} | Лимит: {('без лимита' if not count else count)}")
+
     loop = asyncio.new_event_loop()
-    # Запускаем диагностику перед основным циклом
     test_proxy = proxy_pool.get() if not proxy_pool.is_empty else None
     loop.run_until_complete(run_diagnostics(test_proxy))
-    main_task = loop.create_task(run_forever(count=count, proxy_pool=proxy_pool, debug=debug))
+
+    if use_ui and HAS_UI:
+        setup_logging(debug, use_ui=True)
+
+    main_task = loop.create_task(run_forever(count=count, proxy_pool=proxy_pool, debug=debug, use_ui=use_ui))
     try:
         loop.run_until_complete(main_task)
     except KeyboardInterrupt:
-        logger.info('\n⛔ Остановка... ожидаем завершения текущих задач...')
+        if not use_ui:
+            logger.info('\nОстановка процесса...')
         main_task.cancel()
         try:
             loop.run_until_complete(main_task)
@@ -533,5 +583,7 @@ def main():
             pass
     finally:
         loop.close()
+
+
 if __name__ == '__main__':
     main()
