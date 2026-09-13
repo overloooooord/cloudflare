@@ -78,8 +78,8 @@ async def verify_email(session: AsyncSession, token: str) -> dict:
     return data
 
 async def check_email_verified(session: AsyncSession) -> bool:
-
-    r = await session.get(f'{CF_API}/user', headers={**BASE_HEADERS, 'cache-control': 'no-cache', 'pragma': 'no-cache'}, timeout=20)
+    headers = {**BASE_HEADERS, 'Referer': 'https://dash.cloudflare.com/profile', 'cache-control': 'no-cache', 'pragma': 'no-cache'}
+    r = await session.get(f'{CF_API}/user', headers=headers, timeout=20)
     if r.status_code != 200:
         logger.debug(f'check_email_verified: status={r.status_code} body={r.text[:200]}')
         return False
@@ -88,8 +88,9 @@ async def check_email_verified(session: AsyncSession) -> bool:
     if not verified:
         logger.debug(f'check_email_verified: API responded 200 but email_verified={verified}')
     return verified
-async def login_user(session: AsyncSession, email: str, password: str, cf_challenge_response: str) -> dict:
 
+
+async def login_user(session: AsyncSession, email: str, password: str, cf_challenge_response: str) -> dict:
     payload = {'email': email, 'password': password, 'cf_challenge_response': cf_challenge_response}
     r = await session.post(f'{CF_API}/login', json=payload, headers=BASE_HEADERS, timeout=30)
     data = r.json()
@@ -97,27 +98,49 @@ async def login_user(session: AsyncSession, email: str, password: str, cf_challe
     if r.status_code != 200:
         raise RuntimeError(f'login_user failed {r.status_code}: {r.text[:300]}')
     return data
-async def reauthenticate(session: AsyncSession) -> dict:
 
-    r = await session.post(f'{CF_API}/user/reauthenticate', data='', headers={**BASE_HEADERS, 'Content-Type': 'application/json'}, timeout=30)
+
+async def reauthenticate(session: AsyncSession) -> dict:
+    headers = {**BASE_HEADERS, 'Referer': 'https://dash.cloudflare.com/profile/api-tokens', 'Content-Type': 'application/json'}
+    r = await session.post(f'{CF_API}/user/reauthenticate', data='', headers=headers, timeout=30)
     data = r.json()
     logger.debug(f'reauthenticate status={r.status_code} body={r.text[:200]}')
     if r.status_code not in (200, 202):
         raise RuntimeError(f'reauthenticate failed {r.status_code}: {r.text[:300]}')
     return data
-async def get_global_api_key(session: AsyncSession, otp_code: str, cf_challenge_response: str) -> str:
 
+
+async def get_global_api_key(session: AsyncSession, otp_code: str, cf_challenge_response: str, max_retries: int = 4) -> str:
     payload = {'password': otp_code, 'cf_challenge_response': cf_challenge_response}
-    headers = {**BASE_HEADERS, 'cache-control': 'no-cache', 'pragma': 'no-cache'}
-    r = await session.post(f'{CF_API}/user/api_key', json=payload, headers=headers, timeout=30)
-    logger.debug(f'get_global_api_key status={r.status_code} body={r.text[:300]}')
-    try:
-        data = r.json()
-    except Exception:
-        raise RuntimeError(f'get_global_api_key non-JSON response {r.status_code}: {r.text[:300]}')
-    if r.status_code != 200:
+    headers = {
+        **BASE_HEADERS,
+        'Referer': 'https://dash.cloudflare.com/profile/api-tokens',
+        'cache-control': 'no-cache',
+        'pragma': 'no-cache'
+    }
+
+    for attempt in range(1, max_retries + 1):
+        r = await session.post(f'{CF_API}/user/api_key', json=payload, headers=headers, timeout=30)
+        logger.debug(f'get_global_api_key (attempt {attempt}) status={r.status_code} body={r.text[:300]}')
+        try:
+            data = r.json()
+        except Exception:
+            raise RuntimeError(f'get_global_api_key non-JSON response {r.status_code}: {r.text[:300]}')
+
+        if r.status_code == 200 and data.get('success'):
+            api_key = (data.get('result') or {}).get('api_key')
+            if not api_key:
+                raise RuntimeError(f'api_key not found in response: {r.text[:300]}')
+            return api_key
+
+        errors = data.get('errors', [])
+        is_email_unverified = any(err.get('code') == 1211 for err in errors)
+        if is_email_unverified and attempt < max_retries:
+            logger.warning(f'get_global_api_key 1211 (email verification propagating), waiting sync ({attempt}/{max_retries})...')
+            await asyncio.sleep(2.0 * attempt)
+            await check_email_verified(session)
+            continue
+
         raise RuntimeError(f'get_global_api_key failed {r.status_code}: {r.text[:300]}')
-    api_key = (data.get('result') or {}).get('api_key')
-    if not api_key:
-        raise RuntimeError(f'api_key not found in response: {r.text[:300]}')
-    return api_key
+
+    raise RuntimeError('get_global_api_key: max retries exceeded')

@@ -370,6 +370,12 @@ async def register_one(worker_id: int, proxy_pool: proxy_utils.ProxyPool, stats:
                     ui.update_worker(worker_id, email, "[blue]Верификация email...[/blue]", proxy or "-")
                 await cf_api.verify_email(cf_session, verify_token)
 
+                # Wait for Cloudflare edge DB to confirm email is verified
+                for _ in range(5):
+                    await asyncio.sleep(1.0)
+                    if await cf_api.check_email_verified(cf_session):
+                        break
+
                 step = 'reauthenticate'
                 known_ids_otp = await mail_tm.get_existing_message_ids(
                     mail_session, mail_token, email=mail_email, mail_password=mail_pass

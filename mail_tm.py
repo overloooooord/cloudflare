@@ -224,9 +224,20 @@ def extract_verification_url(html: str) -> str:
 
 
 def extract_verification_token(html: str) -> str:
-    patterns = [r'token=([^"&\s\']+)']
+    try:
+        url = extract_verification_url(html)
+        m = re.search(r'token=([^"&\s\']+)', url)
+        if m:
+            return m.group(1)
+    except Exception:
+        pass
+    patterns = [
+        r'email-verification\?token=([^"&\s\']+)',
+        r'verify-email[^"\']*token=([^"&\s\']+)',
+        r'token=([^"&\s\']+)',
+    ]
     for pat in patterns:
-        m = re.search(pat, html)
+        m = re.search(pat, html, re.IGNORECASE)
         if m:
             return m.group(1)
     raise ValueError('Не найден token в письме верификации')
