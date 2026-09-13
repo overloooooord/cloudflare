@@ -23,33 +23,75 @@ def _load_pool(filepath: str = None):
         filepath = os.path.join(os.path.dirname(__file__), 'emails.txt')
 
     registered_emails = set()
-    try:
-        import config
-        out_file = getattr(config, 'OUTPUT_FILE', 'results.json')
-        if not os.path.isabs(out_file):
-            out_file = os.path.join(os.path.dirname(__file__), out_file)
-        if os.path.exists(out_file):
-            with open(out_file, 'r', encoding='utf-8') as f:
-                res_data = json.load(f)
-                for entry in res_data.get('clouds', []):
-                    reg_email = entry.split(':')[0].strip().lower()
-                    if reg_email:
-                        registered_emails.add(reg_email)
-    except Exception:
-        pass
+    src_dir = os.path.dirname(__file__)
+    for rf in ['results.json', 'results.txt']:
+        p = os.path.join(src_dir, rf)
+        if os.path.exists(p):
+            try:
+                if rf.endswith('.json'):
+                    with open(p, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                    for entry in data.get('clouds', []):
+                        reg_em = entry.split(':')[0].strip().lower()
+                        if reg_em:
+                            registered_emails.add(reg_em)
+                else:
+                    with open(p, 'r', encoding='utf-8') as f:
+                        for line in f:
+                            if line.strip():
+                                reg_em = line.split(':')[0].strip().lower()
+                                if reg_em:
+                                    registered_emails.add(reg_em)
+            except Exception:
+                pass
 
-    with open(filepath, 'r') as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith('#'):
-                continue
-            parts = line.split(':', 1)
-            if len(parts) == 2:
-                em = parts[0].strip()
-                if em.lower() not in registered_emails:
-                    _email_pool.append({'email': em, 'password': parts[1].strip()})
+    if os.path.exists(filepath):
+        cleaned_lines = []
+        with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+            for line in f:
+                line_str = line.strip()
+                if not line_str or line_str.startswith('#'):
+                    continue
+                parts = line_str.split(':', 1)
+                if len(parts) == 2:
+                    em = parts[0].strip()
+                    if em.lower() not in registered_emails:
+                        _email_pool.append({'email': em, 'password': parts[1].strip()})
+                        cleaned_lines.append(f"{em}:{parts[1].strip()}\n")
+
+        # Automatically clean emails.txt on disk from already registered emails
+        try:
+            with open(filepath, 'w', encoding='utf-8') as f:
+                f.writelines(cleaned_lines)
+        except Exception:
+            pass
+
     random.shuffle(_email_pool)
     _pool_loaded = True
+
+
+async def remove_email_from_file(email: str, filepath: str = None):
+    if not email:
+        return
+    if filepath is None:
+        filepath = os.path.join(os.path.dirname(__file__), 'emails.txt')
+    if not os.path.exists(filepath):
+        return
+    global _email_lock
+    if _email_lock is None:
+        _email_lock = asyncio.Lock()
+    async with _email_lock:
+        try:
+            with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+                lines = f.readlines()
+            target_prefix = email.lower() + ':'
+            new_lines = [l for l in lines if not l.strip().lower().startswith(target_prefix)]
+            if len(new_lines) != len(lines):
+                with open(filepath, 'w', encoding='utf-8') as f:
+                    f.writelines(new_lines)
+                logger.info(f"🗑 Почта {email} удалена из emails.txt")
+        except Exception as e:
+            logger.warning(f"Ошибка удаления почты {email} из emails.txt: {e}")
 
 
 class OutOfEmailsError(Exception):

@@ -249,6 +249,23 @@ def generate_random_password(length: int = 16) -> str:
     return ''.join(pwd)
 
 
+_err_lock = asyncio.Lock()
+
+
+async def log_error_to_file(email: str, step: str, err_msg: str, proxy: str = ""):
+    async with _err_lock:
+        err_file = os.path.join(_SRC_DIR, 'errors.txt')
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        clean_err = str(err_msg).replace('\n', ' ').strip()
+        short_p = proxy.split('@')[-1] if '@' in proxy else proxy
+        line = f"[{now_str}] [{email or 'N/A'}] [Шаг: {step}] [Прокси: {short_p or '-'}] {clean_err}\n"
+        try:
+            with open(err_file, 'a', encoding='utf-8') as f:
+                f.write(line)
+        except Exception:
+            pass
+
+
 def setup_logging(debug: bool = False, use_ui: bool = True):
     level = logging.DEBUG if debug else logging.INFO
     fmt = '%(asctime)s [%(levelname)s] %(message)s'
@@ -383,6 +400,7 @@ async def register_one(worker_id: int, proxy_pool: proxy_utils.ProxyPool, stats:
 
         step = 'save'
         await res_module.save_result(config.OUTPUT_FILE, email=mail_email, mail_password=mail_pass, cloud_password=cloud_pass, api_key=api_key, fmt=config.OUTPUT_FORMAT)
+        await mail_tm.remove_email_from_file(mail_email)
         elapsed_one = time.time() - start_t
         await stats.inc_success()
         proxy_pool.report_success(proxy)
@@ -404,6 +422,7 @@ async def register_one(worker_id: int, proxy_pool: proxy_utils.ProxyPool, stats:
             proxy_pool.report_failure(proxy, reason=err_msg[:30])
         await stats.inc_failed()
         logger.error(f"❌ [{email or 'N/A'}] ({step}) {err_msg}")
+        await log_error_to_file(email, step, err_msg, proxy or "")
         if ui:
             ui.add_error(email, f"[{step}] {err_msg}", proxy or "-")
             ui.update_worker(worker_id, email or "-", f"[red]Ошибка ({step})[/red]", proxy or "-")

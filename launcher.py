@@ -139,12 +139,13 @@ def main():
         print("    2. Настройки (config.py)")
         print("    3. Список почт (emails.txt)")
         print("    4. Список прокси (proxies.txt)")
-        print("    5. Результаты (results.json)")
-        print("    6. Проверка балансов и статуса")
-        print("    7. Выход\n")
+        print("    5. Успешные результаты (results.json)")
+        print("    6. Журнал ошибок (errors.txt)")
+        print("    7. Проверка балансов и статуса")
+        print("    8. Выход\n")
 
         try:
-            choice = input("Выберите действие (1-7): ").strip()
+            choice = input("Выберите действие (1-8): ").strip()
         except (KeyboardInterrupt, EOFError):
             print("\nВыход...")
             sys.exit(0)
@@ -193,8 +194,10 @@ def main():
                 results_path = os.path.join(py_dir, "results.txt")
             open_file(results_path)
         elif choice == "6":
-            check_balances(py_dir)
+            open_file(os.path.join(py_dir, "errors.txt"))
         elif choice == "7":
+            check_balances(py_dir)
+        elif choice == "8":
             sys.exit(0)
 
 if __name__ == "__main__":
