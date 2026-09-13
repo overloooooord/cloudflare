@@ -36,6 +36,8 @@ class TerminalUI:
         if worker_id not in self.workers:
             self.workers[worker_id] = {'email': email, 'status': status, 'proxy': proxy, 'start': now}
         else:
+            if email and email != '-' and email != self.workers[worker_id].get('email'):
+                self.workers[worker_id]['start'] = now
             if email:
                 self.workers[worker_id]['email'] = email
             if status:

@@ -39,19 +39,18 @@ if not errorlevel 1 (
     goto RUN
 )
 
-:: 4. Python not found anywhere - friendly error message
+:: 4. Python not found anywhere - auto setup!
+echo [*] Python ne nayden. Zapusk avtomaticheskoy nastroyki...
+if exist "%~dp0setup.bat" (
+    call "%~dp0setup.bat"
+    if exist "%~dp0python\python.exe" (
+        set "PYTHON_EXE=%~dp0python\python.exe"
+        goto RUN
+    )
+)
+
 echo ============================================================
-echo  [!] OSHIBKA: Python ne nayden v etoy papke!
-echo ============================================================
-echo.
-echo  Na vashem servere gotovyy Python nahoditsya v:
-echo  Desktop\src\python
-echo.
-echo  Chtoby zapustit reger:
-echo  1) Skopiruyte papku 'python' iz Desktop\src v etu papku.
-echo     ILI
-echo  2) Skopiruyte vse fayly iz etoy papki v Desktop\src
-echo     i zapustite start.bat tam!
+echo  [!] OSHIBKA: Ne udalos ustanovit Python avtomaticheski!
 echo ============================================================
 echo.
 pause
