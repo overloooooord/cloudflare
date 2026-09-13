@@ -7,6 +7,12 @@ if sys.platform == 'win32':
         import ctypes
         ctypes.windll.kernel32.SetConsoleOutputCP(65001)
         ctypes.windll.kernel32.SetConsoleCP(65001)
+        hStdin = ctypes.windll.kernel32.GetStdHandle(-10)
+        mode = ctypes.c_ulong()
+        ctypes.windll.kernel32.GetConsoleMode(hStdin, ctypes.byref(mode))
+        mode.value &= ~0x0040
+        mode.value |= 0x0080
+        ctypes.windll.kernel32.SetConsoleMode(hStdin, mode.value)
     except Exception:
         pass
     try:

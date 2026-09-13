@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 BASE_URL = 'https://api.notletters.com'
 
 _email_pool: list[dict] = []
-_email_lock = asyncio.Lock()
+_email_lock = None
 _pool_loaded = False
 
 
@@ -63,8 +63,10 @@ def get_remaining_emails() -> int:
 
 
 async def create_mailbox(session: aiohttp.ClientSession = None) -> dict:
-    global _email_pool
+    global _email_pool, _email_lock
     _load_pool()
+    if _email_lock is None:
+        _email_lock = asyncio.Lock()
 
     async with _email_lock:
         if not _email_pool:
