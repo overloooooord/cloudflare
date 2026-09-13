@@ -2,6 +2,19 @@ import os
 import sys
 import subprocess
 
+if sys.platform == 'win32':
+    try:
+        import ctypes
+        ctypes.windll.kernel32.SetConsoleOutputCP(65001)
+        ctypes.windll.kernel32.SetConsoleCP(65001)
+    except Exception:
+        pass
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+        sys.stderr.reconfigure(encoding='utf-8')
+    except Exception:
+        pass
+
 _SRC_DIR = os.path.dirname(os.path.abspath(__file__))
 if _SRC_DIR not in sys.path:
     sys.path.insert(0, _SRC_DIR)
@@ -433,8 +446,9 @@ async def run_forever(count: int | None, proxy_pool: proxy_utils.ProxyPool, debu
             pass
 
     async def execute_batch():
+        nonlocal tasks
         if count:
-            tasks = [asyncio.create_task(worker()) for _ in range(count)]
+            tasks.extend(asyncio.create_task(worker()) for _ in range(count))
             await asyncio.gather(*tasks, return_exceptions=True)
         else:
             while not shutdown.is_set():
