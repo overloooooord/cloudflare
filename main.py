@@ -369,27 +369,7 @@ async def register_one(worker_id: int, proxy_pool: proxy_utils.ProxyPool, stats:
                 if ui:
                     ui.update_worker(worker_id, email, "[blue]Верификация email...[/blue]", proxy or "-")
                 await cf_api.verify_email(cf_session, verify_token)
-
-                # Wait for Cloudflare edge DB to confirm email is verified
-                verified = False
-                for v_attempt in range(1, 15):
-                    await asyncio.sleep(1.2)
-                    try:
-                        await cf_session.get('https://dash.cloudflare.com/profile/api-tokens', headers=cf_api.BASE_HEADERS, timeout=15)
-                    except Exception:
-                        pass
-                    if await cf_api.check_email_verified(cf_session):
-                        verified = True
-                        break
-                    if v_attempt in (4, 8):
-                        logger.warning(f'[{email}] email_verified еще False, повторный запрос verify_email...')
-                        try:
-                            await cf_api.verify_email(cf_session, verify_token)
-                        except Exception:
-                            pass
-
-                if not verified:
-                    raise RuntimeError('Email не подтвержден Cloudflare (таймаут синхронизации верификации)')
+                await asyncio.sleep(1.0)
 
                 step = 'reauthenticate'
                 known_ids_otp = await mail_tm.get_existing_message_ids(
@@ -417,7 +397,20 @@ async def register_one(worker_id: int, proxy_pool: proxy_utils.ProxyPool, stats:
                 if ui:
                     ui.update_worker(worker_id, email, "[green]Запрос Global API Key...[/green]", proxy or "-")
 
-                api_key = await cf_api.get_global_api_key(cf_session, otp_code, cf_challenge_key)
+                api_key = None
+                for key_attempt in range(1, 3):
+                    try:
+                        api_key = await cf_api.get_global_api_key(cf_session, otp_code, cf_challenge_key)
+                        break
+                    except Exception as e:
+                        if '1211' in str(e) and key_attempt < 2:
+                            logger.warning(f'[{email}] Cloudflare 1211 (синхронизация email), решаем свежую капчу и повторяем...')
+                            if ui:
+                                ui.update_worker(worker_id, email, "[yellow]Синхронизация CF (1211)...[/yellow]", proxy or "-")
+                            await asyncio.sleep(3.0)
+                            cf_challenge_key = await turnstile.solve_turnstile(action='onboarding', proxy=proxy)
+                            continue
+                        raise
                 if not api_key:
                     raise RuntimeError('Global API Key не получен')
 

@@ -71,29 +71,15 @@ async def create_user(session: AsyncSession, email: str, password: str, security
 
 async def verify_email(session: AsyncSession, token: str) -> dict:
     try:
-        await session.get(f'https://dash.cloudflare.com/email-verification?token={token}', headers=BASE_HEADERS, timeout=20)
+        await session.get(f'https://dash.cloudflare.com/email-verification?token={token}', headers=BASE_HEADERS, timeout=10)
     except Exception:
         pass
     headers = {**BASE_HEADERS, 'Referer': f'https://dash.cloudflare.com/email-verification?token={token}'}
-    r = await session.put(f'{CF_API}/user/email-verification', json={'token': token}, headers=headers, timeout=30)
+    r = await session.put(f'{CF_API}/user/email-verification', json={'token': token}, headers=headers, timeout=20)
     data = r.json()
     if r.status_code != 200 or not data.get('success'):
         raise RuntimeError(f'verify_email failed {r.status_code}: {r.text[:300]}')
     return data
-
-
-async def check_email_verified(session: AsyncSession) -> bool:
-    headers = {**BASE_HEADERS, 'Referer': 'https://dash.cloudflare.com/profile', 'cache-control': 'no-cache', 'pragma': 'no-cache'}
-    r = await session.get(f'{CF_API}/user', headers=headers, timeout=20)
-    if r.status_code != 200:
-        logger.debug(f'check_email_verified: status={r.status_code} body={r.text[:200]}')
-        return False
-    data = r.json()
-    res = data.get('result', {})
-    verified = res.get('email_verified', False) or res.get('has_verified_email', False)
-    if not verified:
-        logger.debug(f'check_email_verified: API responded 200 but email_verified={verified}')
-    return bool(verified)
 
 
 async def login_user(session: AsyncSession, email: str, password: str, cf_challenge_response: str) -> dict:
