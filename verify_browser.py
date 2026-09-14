@@ -469,3 +469,95 @@ async def signup_via_browser(email: str, password: str, proxy: str | None = None
                     }''')
 
         return await _finish(signup_success)
+
+
+async def verify_email_via_browser(verify_url: str, proxy: str | None = None, timeout: int = 120) -> bool:
+    """
+    Открывает ссылку верификации email в Camoufox (non-headless).
+    Cloudflare WAF на /email-verification?token=... пропускает браузер,
+    затем JS страницы сам делает PUT /user/email-verification,
+    после чего страница редиректит → email_verified становится True.
+    Возвращает True если верификация прошла успешно.
+    """
+    from camoufox.async_api import AsyncCamoufox
+    camoufox_args = _build_camoufox_args(proxy)
+
+    logger.info(f'[verify_email_via_browser] Открываем браузер для: {verify_url[:80]}...')
+
+    async with AsyncCamoufox(**camoufox_args) as browser:
+        context = await browser.new_context()
+        page = await context.new_page()
+        page.set_default_navigation_timeout(60000)
+        page.set_default_timeout(60000)
+
+        verified = False
+
+        async def on_response(response):
+            nonlocal verified
+            if '/user/email-verification' in response.url and response.request.method == 'PUT':
+                try:
+                    body = await response.json()
+                    if body.get('success'):
+                        verified = True
+                        logger.info('[verify_email_via_browser] PUT /user/email-verification success!')
+                except Exception:
+                    pass
+
+        page.on('response', on_response)
+
+        try:
+            await page.goto(verify_url, wait_until='domcontentloaded', timeout=60000)
+        except Exception as e:
+            logger.warning(f'[verify_email_via_browser] goto error (продолжаем): {e}')
+
+        await dismiss_cookie_banner(page)
+
+        # Если WAF challenge — решаем Turnstile
+        for _ in range(3):
+            try:
+                pt = (await page.evaluate('document.body?.innerText || ""')).lower()
+                if any(kw in pt for kw in ['just a moment', 'security verification', 'verify you are human']):
+                    logger.info('[verify_email_via_browser] WAF detected, bypassing Turnstile...')
+                    await bypass_turnstile_safely(page, timeout=20000, max_attempts=8)
+                    await asyncio.sleep(1.0)
+                    break
+            except Exception:
+                pass
+            await asyncio.sleep(0.5)
+
+        # Ждём либо PUT success, либо редирект с /email-verification
+        deadline = asyncio.get_event_loop().time() + timeout
+        while asyncio.get_event_loop().time() < deadline:
+            if verified:
+                break
+
+            # Редирект прочь от /email-verification = успех
+            try:
+                cur = page.url or ''
+                if cur and 'email-verification' not in cur and 'cloudflare.com' in cur:
+                    logger.info(f'[verify_email_via_browser] Редирект на: {cur}')
+                    verified = True
+                    break
+            except Exception:
+                pass
+
+            # Текстовый признак успеха
+            try:
+                pt = (await page.evaluate('document.body?.innerText || ""')).lower()
+                if any(kw in pt for kw in ['email has been verified', 'email verified', 'welcome to cloudflare', 'your email is verified']):
+                    logger.info('[verify_email_via_browser] Страница показывает: верифицировано')
+                    verified = True
+                    break
+                # Если WAF появился снова — решаем ещё раз
+                if any(kw in pt for kw in ['just a moment', 'security verification', 'verify you are human']):
+                    logger.info('[verify_email_via_browser] WAF повторно, пробуем решить...')
+                    await bypass_turnstile_safely(page, timeout=15000, max_attempts=6)
+            except Exception:
+                pass
+
+            await asyncio.sleep(0.8)
+
+        if not verified:
+            logger.warning('[verify_email_via_browser] Верификация не подтверждена за отведённое время, продолжаем...')
+
+        return verified

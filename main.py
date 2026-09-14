@@ -222,6 +222,7 @@ import proxy_utils
 import results as res_module
 import cloudflare_api as cf_api
 import turnstile
+import verify_browser as vb
 
 try:
     from ui import TerminalUI, console
@@ -366,10 +367,15 @@ async def register_one(worker_id: int, proxy_pool: proxy_utils.ProxyPool, stats:
                 verify_token = mail_tm.extract_verification_token(html)
 
                 step = 'verify_email'
+                verify_url = f'https://dash.cloudflare.com/email-verification?token={verify_token}'
                 if ui:
-                    ui.update_worker(worker_id, email, "[blue]Верификация email...[/blue]", proxy or "-")
-                await cf_api.verify_email(cf_session, verify_token)
-                await asyncio.sleep(1.0)
+                    ui.update_worker(worker_id, email, "[blue]Верификация email (браузер)...[/blue]", proxy or "-")
+                else:
+                    logger.info(f'[{email}] Верификация email через браузер...')
+                verified = await vb.verify_email_via_browser(verify_url, proxy=proxy, timeout=120)
+                if not verified:
+                    logger.warning(f'[{email}] Браузер не подтвердил верификацию, продолжаем всё равно...')
+                await asyncio.sleep(1.5)
 
                 step = 'reauthenticate'
                 known_ids_otp = await mail_tm.get_existing_message_ids(
