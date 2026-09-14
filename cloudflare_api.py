@@ -70,19 +70,11 @@ async def create_user(session: AsyncSession, email: str, password: str, security
     raise RuntimeError(f'create_user: max retries exhausted for {email}')
 
 async def verify_email(session: AsyncSession, token: str) -> dict:
-    try:
-        await session.get(f'https://dash.cloudflare.com/email-verification?token={token}', headers=BASE_HEADERS, timeout=10)
-    except Exception:
-        pass
     headers = {**BASE_HEADERS, 'Referer': f'https://dash.cloudflare.com/email-verification?token={token}'}
-    r = await session.put(f'{CF_API}/user/email-verification', json={'token': token}, headers=headers, timeout=20)
+    r = await session.put(f'{CF_API}/user/email-verification', json={'token': token}, headers=headers, timeout=30)
     data = r.json()
     if r.status_code != 200 or not data.get('success'):
         raise RuntimeError(f'verify_email failed {r.status_code}: {r.text[:300]}')
-    try:
-        await session.get(f'{CF_API}/user', headers=headers, timeout=10)
-    except Exception:
-        pass
     return data
 
 
