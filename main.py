@@ -398,16 +398,19 @@ async def register_one(worker_id: int, proxy_pool: proxy_utils.ProxyPool, stats:
                     ui.update_worker(worker_id, email, "[green]Запрос Global API Key...[/green]", proxy or "-")
 
                 api_key = None
-                for key_attempt in range(1, 3):
+                for key_attempt in range(1, 4):
                     try:
                         api_key = await cf_api.get_global_api_key(cf_session, otp_code, cf_challenge_key)
                         break
                     except Exception as e:
-                        if '1211' in str(e) and key_attempt < 2:
-                            logger.warning(f'[{email}] Cloudflare 1211 (синхронизация email), решаем свежую капчу и повторяем...')
+                        err_str = str(e)
+                        is_retryable = any(k in err_str for k in ['1211', '1201', 'non-JSON', '500', '502', '503', '504', 'timeout', 'Connection', 'CurlError'])
+                        if is_retryable and key_attempt < 3:
+                            wait_s = 2.0 * key_attempt
+                            logger.warning(f'[{email}] Повтор ключа ({err_str[:40]}), ожидание {wait_s:.0f}с, решаем свежую капчу (попытка {key_attempt+1}/3)...')
                             if ui:
-                                ui.update_worker(worker_id, email, "[yellow]Синхронизация CF (1211)...[/yellow]", proxy or "-")
-                            await asyncio.sleep(3.0)
+                                ui.update_worker(worker_id, email, f"[yellow]Повтор ключа ({key_attempt+1}/3)...[/yellow]", proxy or "-")
+                            await asyncio.sleep(wait_s)
                             cf_challenge_key = await turnstile.solve_turnstile(action='onboarding', proxy=proxy)
                             continue
                         raise

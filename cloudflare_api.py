@@ -79,6 +79,10 @@ async def verify_email(session: AsyncSession, token: str) -> dict:
     data = r.json()
     if r.status_code != 200 or not data.get('success'):
         raise RuntimeError(f'verify_email failed {r.status_code}: {r.text[:300]}')
+    try:
+        await session.get(f'{CF_API}/user', headers=headers, timeout=10)
+    except Exception:
+        pass
     return data
 
 
@@ -94,12 +98,15 @@ async def login_user(session: AsyncSession, email: str, password: str, cf_challe
 
 async def reauthenticate(session: AsyncSession) -> dict:
     headers = {**BASE_HEADERS, 'Referer': 'https://dash.cloudflare.com/profile/api-tokens', 'Content-Type': 'application/json'}
-    r = await session.post(f'{CF_API}/user/reauthenticate', data='', headers=headers, timeout=30)
-    data = r.json()
-    logger.debug(f'reauthenticate status={r.status_code} body={r.text[:200]}')
-    if r.status_code not in (200, 202):
+    for attempt in range(1, 3):
+        r = await session.post(f'{CF_API}/user/reauthenticate', data='', headers=headers, timeout=30)
+        logger.debug(f'reauthenticate status={r.status_code} body={r.text[:200]}')
+        if r.status_code in (200, 202):
+            return r.json()
+        if r.status_code >= 500 and attempt < 2:
+            await asyncio.sleep(1.5)
+            continue
         raise RuntimeError(f'reauthenticate failed {r.status_code}: {r.text[:300]}')
-    return data
 
 
 async def get_global_api_key(session: AsyncSession, otp_code: str, cf_challenge_response: str) -> str:
