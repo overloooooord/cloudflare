@@ -70,12 +70,17 @@ async def create_user(session: AsyncSession, email: str, password: str, security
     raise RuntimeError(f'create_user: max retries exhausted for {email}')
 
 async def verify_email(session: AsyncSession, token: str) -> dict:
+    try:
+        await session.get(f'https://dash.cloudflare.com/email-verification?token={token}', headers=BASE_HEADERS, timeout=20)
+    except Exception:
+        pass
     headers = {**BASE_HEADERS, 'Referer': f'https://dash.cloudflare.com/email-verification?token={token}'}
     r = await session.put(f'{CF_API}/user/email-verification', json={'token': token}, headers=headers, timeout=30)
     data = r.json()
     if r.status_code != 200 or not data.get('success'):
         raise RuntimeError(f'verify_email failed {r.status_code}: {r.text[:300]}')
     return data
+
 
 async def check_email_verified(session: AsyncSession) -> bool:
     headers = {**BASE_HEADERS, 'Referer': 'https://dash.cloudflare.com/profile', 'cache-control': 'no-cache', 'pragma': 'no-cache'}
@@ -84,10 +89,11 @@ async def check_email_verified(session: AsyncSession) -> bool:
         logger.debug(f'check_email_verified: status={r.status_code} body={r.text[:200]}')
         return False
     data = r.json()
-    verified = data.get('result', {}).get('email_verified', False)
+    res = data.get('result', {})
+    verified = res.get('email_verified', False) or res.get('has_verified_email', False)
     if not verified:
         logger.debug(f'check_email_verified: API responded 200 but email_verified={verified}')
-    return verified
+    return bool(verified)
 
 
 async def login_user(session: AsyncSession, email: str, password: str, cf_challenge_response: str) -> dict:
@@ -110,7 +116,7 @@ async def reauthenticate(session: AsyncSession) -> dict:
     return data
 
 
-async def get_global_api_key(session: AsyncSession, otp_code: str, cf_challenge_response: str, max_retries: int = 4) -> str:
+async def get_global_api_key(session: AsyncSession, otp_code: str, cf_challenge_response: str) -> str:
     payload = {'password': otp_code, 'cf_challenge_response': cf_challenge_response}
     headers = {
         **BASE_HEADERS,
@@ -119,28 +125,17 @@ async def get_global_api_key(session: AsyncSession, otp_code: str, cf_challenge_
         'pragma': 'no-cache'
     }
 
-    for attempt in range(1, max_retries + 1):
-        r = await session.post(f'{CF_API}/user/api_key', json=payload, headers=headers, timeout=30)
-        logger.debug(f'get_global_api_key (attempt {attempt}) status={r.status_code} body={r.text[:300]}')
-        try:
-            data = r.json()
-        except Exception:
-            raise RuntimeError(f'get_global_api_key non-JSON response {r.status_code}: {r.text[:300]}')
+    r = await session.post(f'{CF_API}/user/api_key', json=payload, headers=headers, timeout=30)
+    logger.debug(f'get_global_api_key status={r.status_code} body={r.text[:300]}')
+    try:
+        data = r.json()
+    except Exception:
+        raise RuntimeError(f'get_global_api_key non-JSON response {r.status_code}: {r.text[:300]}')
 
-        if r.status_code == 200 and data.get('success'):
-            api_key = (data.get('result') or {}).get('api_key')
-            if not api_key:
-                raise RuntimeError(f'api_key not found in response: {r.text[:300]}')
-            return api_key
+    if r.status_code == 200 and data.get('success'):
+        api_key = (data.get('result') or {}).get('api_key')
+        if not api_key:
+            raise RuntimeError(f'api_key not found in response: {r.text[:300]}')
+        return api_key
 
-        errors = data.get('errors', [])
-        is_email_unverified = any(err.get('code') == 1211 for err in errors)
-        if is_email_unverified and attempt < max_retries:
-            logger.warning(f'get_global_api_key 1211 (email verification propagating), waiting sync ({attempt}/{max_retries})...')
-            await asyncio.sleep(2.0 * attempt)
-            await check_email_verified(session)
-            continue
-
-        raise RuntimeError(f'get_global_api_key failed {r.status_code}: {r.text[:300]}')
-
-    raise RuntimeError('get_global_api_key: max retries exceeded')
+    raise RuntimeError(f'get_global_api_key failed {r.status_code}: {r.text[:300]}')

@@ -371,10 +371,25 @@ async def register_one(worker_id: int, proxy_pool: proxy_utils.ProxyPool, stats:
                 await cf_api.verify_email(cf_session, verify_token)
 
                 # Wait for Cloudflare edge DB to confirm email is verified
-                for _ in range(5):
-                    await asyncio.sleep(1.0)
+                verified = False
+                for v_attempt in range(1, 15):
+                    await asyncio.sleep(1.2)
+                    try:
+                        await cf_session.get('https://dash.cloudflare.com/profile/api-tokens', headers=cf_api.BASE_HEADERS, timeout=15)
+                    except Exception:
+                        pass
                     if await cf_api.check_email_verified(cf_session):
+                        verified = True
                         break
+                    if v_attempt in (4, 8):
+                        logger.warning(f'[{email}] email_verified еще False, повторный запрос verify_email...')
+                        try:
+                            await cf_api.verify_email(cf_session, verify_token)
+                        except Exception:
+                            pass
+
+                if not verified:
+                    raise RuntimeError('Email не подтвержден Cloudflare (таймаут синхронизации верификации)')
 
                 step = 'reauthenticate'
                 known_ids_otp = await mail_tm.get_existing_message_ids(
