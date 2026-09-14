@@ -99,7 +99,7 @@ async def login_user(session: AsyncSession, email: str, password: str, cf_challe
 async def reauthenticate(session: AsyncSession) -> dict:
     headers = {**BASE_HEADERS, 'Referer': 'https://dash.cloudflare.com/profile/api-tokens', 'Content-Type': 'application/json'}
     for attempt in range(1, 3):
-        r = await session.post(f'{CF_API}/user/reauthenticate', data='', headers=headers, timeout=30)
+        r = await session.post(f'{CF_API}/user/reauthenticate', json={}, headers=headers, timeout=30)
         logger.debug(f'reauthenticate status={r.status_code} body={r.text[:200]}')
         if r.status_code in (200, 202):
             return r.json()
@@ -114,6 +114,7 @@ async def get_global_api_key(session: AsyncSession, otp_code: str, cf_challenge_
     headers = {
         **BASE_HEADERS,
         'Referer': 'https://dash.cloudflare.com/profile/api-tokens',
+        'Content-Type': 'application/json',
         'cache-control': 'no-cache',
         'pragma': 'no-cache'
     }
